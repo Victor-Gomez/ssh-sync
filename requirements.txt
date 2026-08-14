@@ -1,0 +1,8 @@
+# Core CLI
+rich>=13.0
+
+# Web interface.
+# fastapi>=0.111 pulls starlette>=0.37.2, which the modern httpx used by the
+# test client requires; older FastAPI releases fail against httpx 0.28+.
+fastapi>=0.111
+uvicorn[standard]>=0.27

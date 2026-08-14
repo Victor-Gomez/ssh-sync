@@ -1,0 +1,33 @@
+# Local configuration holds real hosts, usernames and SSH key paths.
+config.json
+
+# Run history and migration leftovers
+sync-stats.jsonl
+sync-stats.json
+sync-stats.json.migrated
+*.tmp
+
+# Bundled backend, if dropped in beside the scripts
+rclone.exe
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Editors / OS
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/
+
+# Tailwind toolchain (compiled CSS is committed)
+node_modules/
+package-lock.json

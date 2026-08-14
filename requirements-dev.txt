@@ -1,0 +1,5 @@
+-r requirements.txt
+
+pytest>=7.4
+httpx>=0.26          # Transport behind fastapi.testclient.TestClient
+ruff>=0.3            # Linting and formatting

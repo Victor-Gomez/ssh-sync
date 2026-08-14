@@ -1,0 +1,38 @@
+[project]
+name = "ssh-sync"
+version = "1.0.0"
+description = "Multi-backend file synchronization (rclone/SFTP + robocopy) with live progress, a CLI and a web interface."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "rich>=13.0",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "httpx>=0.26", "ruff>=0.3"]
+
+[project.scripts]
+ssh-sync = "sshsync.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["sshsync*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "B008",    # FastAPI dependencies are declared as call defaults by design.
+    "SIM105",  # try/except/pass reads clearer than contextlib.suppress here.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

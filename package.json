@@ -1,0 +1,14 @@
+{
+  "name": "ssh-sync-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tailwind build for the SSH-Sync web interface. Only needed to change styles — the compiled CSS is committed, so running the app needs Python alone.",
+  "scripts": {
+    "build:css": "tailwindcss -i sshsync/web/styles/input.css -o sshsync/web/static/tailwind.css --minify",
+    "watch:css": "tailwindcss -i sshsync/web/styles/input.css -o sshsync/web/static/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
+  }
+}

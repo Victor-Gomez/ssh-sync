@@ -1,0 +1,366 @@
+/* Tailwind source for the SSH-Sync interface.
+ *
+ * Build with:  npm run build:css        (one-off)
+ *              npm run watch:css        (while editing)
+ *
+ * The compiled result is committed as sshsync/web/static/tailwind.css, so
+ * running the app never needs npm — only changing styles does.
+ */
+
+@import "tailwindcss";
+
+/* v4 scans for class names automatically, but the compiled stylesheet lives in
+   the same folder as the markup, so point it at the sources explicitly. */
+@source "../static/index.html";
+@source "../static/app.js";
+
+/* -- design tokens ------------------------------------------------------
+ *
+ * Every colour in the interface comes from one of these, so a theme is just a
+ * second set of values. The dark palette is the base; `[data-theme="light"]`
+ * below re-points the same names. Nothing else in this file mentions a theme.
+ */
+
+@theme {
+  --color-ink: #0e1116;
+  --color-panel: #161b22;
+  --color-raised: #1c232d;
+  --color-sunken: #0d1117;
+  --color-edge: #2a323d;
+  --color-edge-strong: #3b4553;
+
+  --color-fg: #e6edf3;
+  --color-dim: #8b949e;
+
+  --color-brand: #3b82f6;
+  --color-brand-hover: #2f6fdd;
+  --color-ok: #3fb950;
+  --color-warn: #d29922;
+  --color-fail: #f85149;
+  --color-info: #58a6ff;
+  --color-violet: #a371f7;
+
+  --color-tip: #05080d;
+  --color-tip-fg: #e6edf3;
+  --color-scrim: rgba(1, 4, 9, 0.72);
+  --color-row-hover: rgba(255, 255, 255, 0.02);
+
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  --font-sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* -- base --------------------------------------------------------------- */
+
+@layer base {
+  /* `data-theme` is set by the inline script in index.html before first paint,
+     from the stored choice or the OS preference, so there is no flash.
+
+     Shadows stay plain custom properties rather than `@theme` entries: Tailwind
+     bakes a themed shadow into the utility at build time, which would freeze
+     them at the dark values. Referenced as shadow-[var(--shadow-modal)]. */
+  :root {
+    color-scheme: dark;
+
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
+    --shadow-tooltip: 0 6px 22px rgba(0, 0, 0, 0.55);
+    --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.45);
+
+    --skeleton: #232b36;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+
+    --color-ink: #eef1f5;
+    --color-panel: #ffffff;
+    --color-raised: #f6f8fa;
+    --color-sunken: #f4f6f9;
+    --color-edge: #d6dce4;
+    --color-edge-strong: #b6bfcc;
+
+    --color-fg: #1f2328;
+    --color-dim: #5f6874;
+
+    --color-brand: #2563eb;
+    --color-brand-hover: #1d4ed8;
+    --color-ok: #1a7f37;
+    --color-warn: #9a6700;
+    --color-fail: #cf222e;
+    --color-info: #0969da;
+    --color-violet: #8250df;
+
+    /* The tooltip stays dark in both themes — it reads as an overlay, not a
+       surface — so it needs its own foreground. */
+    --color-tip: #22272e;
+    --color-tip-fg: #f6f8fa;
+    --color-scrim: rgba(31, 35, 40, 0.45);
+    --color-row-hover: rgba(31, 35, 40, 0.04);
+
+    --shadow-modal: 0 24px 64px rgba(31, 35, 40, 0.22);
+    --shadow-tooltip: 0 6px 22px rgba(31, 35, 40, 0.28);
+    --shadow-toast: 0 8px 28px rgba(31, 35, 40, 0.18);
+
+    --skeleton: #e3e8ee;
+  }
+
+  body {
+    @apply bg-ink text-fg font-sans text-[15px] leading-normal antialiased;
+  }
+
+  h1 { @apply text-lg font-semibold tracking-tight; }
+  h2 { @apply text-[15px] font-semibold; }
+}
+
+/* -- components ---------------------------------------------------------
+ *
+ * Only patterns repeated across many elements live here; everything
+ * positional stays as utilities on the element itself. A button appears ~20
+ * times in four variants, so spelling out nine utilities each time would bury
+ * the markup.
+ */
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-[7px] cursor-pointer
+           rounded-md border border-edge-strong bg-raised px-3.5 py-[7px]
+           text-sm text-fg transition-colors
+           hover:not-disabled:border-brand
+           disabled:opacity-45 disabled:cursor-not-allowed;
+  }
+
+  .btn > svg { @apply size-[15px] shrink-0 opacity-85; }
+  .btn:hover:not(:disabled) > svg { @apply opacity-100; }
+
+  .btn-small { @apply gap-1.5 px-2.5 py-1 text-[13px]; }
+  .btn-small > svg { @apply size-[13px]; }
+
+  .btn-ghost { @apply bg-transparent; }
+
+  .btn-primary {
+    @apply bg-brand border-brand text-white font-semibold
+           hover:not-disabled:bg-brand-hover;
+  }
+
+  .btn-danger {
+    @apply bg-transparent border-fail/50 text-fail
+           hover:not-disabled:bg-fail/10;
+  }
+
+  .btn-icon {
+    @apply border-transparent bg-transparent p-[5px] text-dim
+           hover:text-fg hover:border-edge-strong;
+  }
+
+  .btn-icon > svg { @apply size-4; }
+
+  /* Round icon-only controls on cards. */
+  .icon-button {
+    @apply inline-grid place-items-center rounded-full cursor-pointer p-0
+           border border-edge-strong bg-sunken text-dim
+           transition-[background-color,border-color,color,transform]
+           hover:not-disabled:text-fg hover:not-disabled:border-brand
+           active:not-disabled:scale-93
+           disabled:opacity-35 disabled:cursor-not-allowed;
+  }
+
+  .icon-button > svg { @apply size-[55%] block; }
+  .icon-button-run { @apply size-11 text-ok border-ok/45 hover:not-disabled:bg-ok/15 hover:not-disabled:text-ok hover:not-disabled:border-ok; }
+  .icon-button-edit { @apply size-8; }
+
+  /* Mid-run the same button stops the run, so it reads as a warning. */
+  .icon-button-run.is-running {
+    @apply text-warn border-warn/55 bg-warn/10
+           hover:text-warn hover:border-warn hover:bg-warn/20;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-edge bg-sunken px-2.5 py-2
+           text-sm text-fg outline-none focus:border-brand;
+  }
+
+  .input.mono { @apply font-mono text-[13px]; }
+  textarea.input { @apply resize-y; }
+
+  .field { @apply flex flex-col gap-1.5; }
+  .field > span { @apply text-[11px] uppercase tracking-wider text-dim; }
+
+  .checkbox { @apply inline-flex items-center gap-[7px] text-sm cursor-pointer select-none; }
+  .checkbox input { @apply size-[15px] cursor-pointer accent-brand; }
+
+  /* Placeholder bars in the cards shown while the config is still loading.
+     `--skeleton` is a flat tint of the surface rather than an opacity, so the
+     shimmer stays even across the two themes. */
+  .skeleton {
+    @apply rounded bg-[var(--skeleton)] motion-safe:animate-pulse;
+  }
+
+  .panel { @apply rounded-xl border border-edge bg-panel p-[18px]; }
+  .panel-head { @apply mb-3.5 flex flex-wrap items-center justify-between gap-4; }
+
+  .tab {
+    @apply cursor-pointer border-0 border-b-2 border-transparent bg-transparent
+           px-3.5 py-2.5 text-sm text-dim transition-colors hover:text-fg;
+  }
+  .tab.is-active { @apply border-brand text-fg; }
+
+  .view { @apply hidden flex-col gap-5; }
+  .view.is-active { @apply flex; }
+
+  .modal { @apply fixed inset-0 z-[60] grid place-items-center p-2.5 sm:p-5; }
+  .modal[hidden] { @apply hidden; }
+
+  .modal-dialog {
+    @apply relative flex max-h-[calc(100vh-40px)] flex-col rounded-xl
+           border border-edge-strong bg-panel shadow-[var(--shadow-modal)];
+  }
+
+  .tooltip {
+    @apply pointer-events-none fixed z-[100] max-w-80 rounded-md border
+           border-edge-strong bg-tip px-2.5 py-[7px] text-[12.5px] leading-snug
+           text-tip-fg opacity-0 shadow-[var(--shadow-tooltip)]
+           transition-[opacity,transform] duration-150 break-words
+           whitespace-pre-line translate-y-[3px]
+           motion-reduce:transition-none;
+  }
+  .tooltip.is-visible { @apply translate-y-0 opacity-100; }
+
+  .toast {
+    @apply pointer-events-auto flex min-w-60 max-w-sm items-center gap-2.5
+           rounded-xl border border-edge-strong bg-raised px-4 py-3 text-sm
+           shadow-[var(--shadow-toast)];
+  }
+  .toast::before { content: ""; @apply size-2 shrink-0 rounded-full bg-brand; }
+  .toast-ok { @apply border-ok/40; }
+  .toast-ok::before { @apply bg-ok; }
+  .toast-error { @apply border-fail/40; }
+  .toast-error::before { @apply bg-fail; }
+
+  /* Thin determinate progress line under a running job's stats. */
+  .bar { @apply mt-1 h-1 min-w-16 overflow-hidden rounded-sm bg-edge; }
+  .bar > span { @apply block h-full bg-brand transition-[width] duration-200; }
+  .bar-ok > span { @apply bg-ok; }
+  .bar-fail > span { @apply bg-fail; }
+
+  /* Small square label: backend type, run outcome, disabled marker. */
+  .tag { @apply rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider; }
+  .tag-rclone    { @apply bg-info/15 text-info; }
+  .tag-robocopy  { @apply bg-violet/15 text-violet; }
+  .tag-ok        { @apply bg-ok/15 text-ok; }
+  .tag-fail      { @apply bg-fail/15 text-fail; }
+  .tag-running   { @apply bg-warn/15 text-warn; }
+  .tag-skipped   { @apply bg-info/15 text-info; }
+  .tag-cancelled { @apply bg-fail/15 text-fail; }
+  .tag-disabled  { @apply bg-dim/12 text-dim; }
+
+  /* Rounded pill: connection and run state. */
+  .pill { @apply whitespace-nowrap rounded-full border border-transparent px-2.5 py-[3px] text-xs font-semibold; }
+  .pill-idle    { @apply bg-dim/15 text-dim border-edge; }
+  .pill-muted   { @apply bg-transparent text-dim border-edge; }
+  .pill-running { @apply bg-warn/15 text-warn border-warn/40; }
+  .pill-ok      { @apply bg-ok/15 text-ok border-ok/40; }
+  .pill-fail    { @apply bg-fail/15 text-fail border-fail/40; }
+
+  .badge { @apply whitespace-nowrap rounded-full border border-transparent px-[7px] py-0.5 text-[10px] font-bold uppercase tracking-wider; }
+  .badge-ok      { @apply bg-ok/15 text-ok border-ok/35; }
+  .badge-fail    { @apply bg-fail/15 text-fail border-fail/35; }
+  .badge-busy    { @apply bg-warn/15 text-warn border-warn/35; }
+  .badge-unknown { @apply bg-dim/12 text-dim border-edge; }
+
+  .data-table { @apply w-full border-collapse text-[13px]; }
+  .data-table th {
+    @apply whitespace-nowrap border-b border-edge px-2.5 py-2 text-left
+           text-[11px] uppercase tracking-wider text-dim;
+  }
+  .data-table th.num, .data-table td.num { @apply text-right; }
+  .data-table td { @apply whitespace-nowrap border-b border-edge px-2.5 py-2; }
+  .data-table tbody tr:hover { @apply bg-row-hover; }
+  .data-table tfoot td { @apply border-b-0 border-t-2 border-t-edge-strong font-bold; }
+  .data-table td.wrap { @apply max-w-80 whitespace-normal; }
+  .data-table .empty td { @apply py-6 text-center text-dim; }
+
+  .status-ok        { @apply text-ok font-semibold; }
+  .status-fail      { @apply text-fail font-semibold; }
+  .status-running   { @apply text-warn font-semibold; }
+  .status-pending   { @apply text-dim; }
+  .status-skipped   { @apply text-info font-semibold; }
+  .status-cancelled { @apply text-fail font-semibold; }
+
+  .message { @apply rounded-md px-3 py-2.5 text-sm; }
+  .message-ok    { @apply border border-ok/30 bg-ok/10 text-ok; }
+  .message-error { @apply border border-fail/30 bg-fail/10 text-fail; }
+}
+
+/* -- utilities ----------------------------------------------------------
+ *
+ * Things utilities cannot express: pseudo-element arrows driven by a custom
+ * property, and the two keyframe animations.
+ */
+
+@layer utilities {
+  /* Lucide draws with strokes, not fills. These are inherited SVG properties,
+     so setting them on the outer <svg> carries into the referenced <symbol>. */
+  .lucide {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* Relative timestamps carry the exact date in a tooltip, so hint at it. */
+  [data-relative] {
+    border-bottom: 1px dotted var(--color-edge-strong);
+    cursor: help;
+  }
+
+  /* Arrow: a rotated square peeking out from the edge nearest the target.
+     --arrow-x tracks the target's centre so it still points correctly when the
+     bubble is clamped against a viewport edge. */
+  .tooltip::after {
+    content: "";
+    position: absolute;
+    left: var(--arrow-x, 50%);
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    background: var(--color-tip);
+    border: 1px solid var(--color-edge-strong);
+    transform: rotate(45deg);
+    bottom: -5px;
+    border-top: none;
+    border-left: none;
+  }
+
+  .tooltip.is-below::after {
+    bottom: auto;
+    top: -5px;
+    border: 1px solid var(--color-edge-strong);
+    border-bottom: none;
+    border-right: none;
+  }
+
+  .animate-modal-in { animation: modal-in .14s ease-out; }
+  .animate-toast-in { animation: toast-in .16s ease-out; }
+  .toast.is-leaving { animation: toast-out .2s ease-in forwards; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-modal-in,
+    .animate-toast-in,
+    .toast.is-leaving { animation: none; }
+    .toast.is-leaving { opacity: 0; }
+  }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(.99); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes toast-out {
+  to { opacity: 0; transform: translateX(16px); }
+}

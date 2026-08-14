@@ -1,0 +1,97 @@
+{
+    "servers": [
+        {
+            "name": "NAS",
+            "host": "192.168.1.10",
+            "user": "backup",
+            "ssh_key_path": "~/.ssh/id_ed25519",
+            "port": 22
+        },
+        {
+            "name": "Laptop",
+            "host": "localhost",
+            "user": "myuser",
+            "ssh_key_path": "~/.ssh/id_ed25519",
+            "port": 2222
+        }
+    ],
+    "sync_jobs": [
+        {
+            "name": "Documents",
+            "type": "robocopy",
+            "source": "C:/Users/myuser/Documents",
+            "destination": "D:/Backup/Documents"
+        },
+        {
+            "name": "Photos",
+            "type": "robocopy",
+            "source": "D:/Photos",
+            "destination": "E:/Backup/Photos"
+        },
+        {
+            "name": "Presets",
+            "type": "robocopy",
+            "source": "C:/Users/myuser/AppData/Roaming/EditorPresets",
+            "destination": "D:/Backup/EditorPresets",
+            "robocopy_mirror": false,
+            "robocopy_level": 1
+        },
+        {
+            "name": "Code",
+            "type": "robocopy",
+            "source": "C:/Code",
+            "destination": "D:/Backup/Code",
+            "blacklisted_dirnames": [
+                "__pycache__",
+                ".pytest_cache",
+                "obj",
+                "bin",
+                "build",
+                "dist",
+                "out",
+                ".venv",
+                "venv"
+            ],
+            "blacklisted_filenames": [
+                "*.obj",
+                "*.pdb",
+                "*.pyc"
+            ]
+        },
+        {
+            "name": "Documents",
+            "type": "rclone",
+            "server": "NAS",
+            "source": "C:/Users/myuser/Documents",
+            "destination": "/srv/backup/Documents"
+        },
+        {
+            "name": "Photos",
+            "type": "rclone",
+            "server": "NAS",
+            "source": "D:/Photos",
+            "destination": "/srv/backup/Photos",
+            "blacklisted_dirnames": [
+                "thumbs",
+                "cache"
+            ],
+            "blacklisted_filenames": [
+                "*.tmp"
+            ]
+        },
+        {
+            "name": "Code",
+            "type": "rclone",
+            "server": "Laptop",
+            "source": "C:/Code",
+            "destination": "C:/Users/myuser/Desktop/Code",
+            "blacklisted_dirnames": [
+                "__pycache__",
+                "node_modules",
+                "build",
+                "dist"
+            ],
+            "enabled": false
+        }
+    ]
+}
