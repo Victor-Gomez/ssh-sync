@@ -304,6 +304,17 @@ function toast(message, kind = "ok") {
 
 /* -- application state -------------------------------------------------- */
 
+const DEVICE_KEY = "sshsync-device";
+const ALL_DEVICES = "all";
+
+function storedDevice() {
+  try {
+    return localStorage.getItem(DEVICE_KEY) || ALL_DEVICES;
+  } catch (error) {
+    return ALL_DEVICES;  /* not fatal — the filter just resets each visit */
+  }
+}
+
 const state = {
   config: null,        // The saved config, as loaded from the server.
   jobs: [],            // Per-job summaries derived from the saved config.
@@ -314,6 +325,7 @@ const state = {
   loaded: false,       // False until the config and its history have arrived.
   running: false,
   runElapsed: "",
+  device: storedDevice(),  // Device filter: "all", "local" or a server name.
 };
 
 function liveStateFor(job) {
@@ -359,7 +371,7 @@ $$(".tab").forEach((tab) => {
       view.classList.toggle("is-active", view.id === `view-${tab.dataset.view}`);
     });
     if (tab.dataset.view === "history") loadHistory();
-    if (tab.dataset.view === "logs") loadLogs();
+    if (tab.dataset.view === "logs") reloadLogs();
   });
 });
 
@@ -519,6 +531,103 @@ function renderServers() {
   });
 }
 
+/* -- device filter ------------------------------------------------------ */
+
+/* Jobs are grouped by the machine they write to: "local" for robocopy mirrors,
+ * the server name for rclone uploads. With a dozen jobs across three machines,
+ * looking at one machine's worth is the common case.
+ */
+
+/** The device a job belongs to: its server, or "local" for robocopy jobs. */
+function deviceOf(job) {
+  return job.type === "rclone" ? job.server : "local";
+}
+
+function setDevice(device) {
+  state.device = device;
+  try {
+    localStorage.setItem(DEVICE_KEY, device);
+  } catch (error) {
+    /* not fatal — the choice just lasts for this page */
+  }
+  renderDeviceFilter();
+  renderJobs();
+  renderRunAllButton();
+}
+
+/** Jobs matching the active device filter, in config order. */
+function visibleJobs() {
+  if (state.device === ALL_DEVICES) return state.jobs;
+  return state.jobs.filter((job) => deviceOf(job) === state.device);
+}
+
+/** Devices that have at least one job, local first and servers in config order. */
+function knownDevices() {
+  const order = ["local", ...state.servers.map((server) => server.name)];
+  const used = new Set(state.jobs.map(deviceOf));
+  return order.filter((device) => used.has(device));
+}
+
+function renderDeviceFilter() {
+  const container = $("#job-filters");
+  container.textContent = "";
+
+  const devices = knownDevices();
+  // A single device makes the filter a row of one — nothing to choose between.
+  if (devices.length < 2) {
+    state.device = ALL_DEVICES;
+    return;
+  }
+
+  // A device can disappear when its server is deleted; do not filter to nothing.
+  if (state.device !== ALL_DEVICES && !devices.includes(state.device)) {
+    state.device = ALL_DEVICES;
+  }
+
+  [ALL_DEVICES, ...devices].forEach((device) => {
+    const count =
+      device === ALL_DEVICES
+        ? state.jobs.length
+        : state.jobs.filter((job) => deviceOf(job) === device).length;
+
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `chip${device === state.device ? " is-active" : ""}`;
+    chip.setAttribute("aria-pressed", String(device === state.device));
+    chip.dataset.tip =
+      device === ALL_DEVICES ? "Show every job" : `Show only jobs on ${device}`;
+    chip.textContent = device === ALL_DEVICES ? "All" : device;
+
+    const badge = document.createElement("span");
+    badge.className = "chip-count";
+    badge.textContent = count;
+    chip.append(badge);
+
+    chip.addEventListener("click", () => setDevice(device));
+    container.append(chip);
+  });
+}
+
+/** Label and targets for the run-all button, narrowed by the active filter. */
+function runAllTarget() {
+  const jobs = visibleJobs().filter((job) => job.enabled);
+  if (state.device === ALL_DEVICES) {
+    return { label: "all enabled jobs", selectors: null, text: "Run all enabled" };
+  }
+  return {
+    label: `${jobs.length} job(s) on ${state.device}`,
+    selectors: jobs.map((job) => job.selector),
+    text: `Run all on ${state.device}`,
+  };
+}
+
+function renderRunAllButton() {
+  const button = $("#btn-run-all");
+  const target = runAllTarget();
+  button.lastChild.textContent = target.text;
+  button.disabled = state.running || target.selectors?.length === 0;
+}
+
 /* -- job cards ---------------------------------------------------------- */
 
 const STATUS_CLASSES = {
@@ -604,9 +713,19 @@ function renderJobs() {
   container.removeAttribute("aria-busy");
 
   // Disabled jobs sink to the bottom; config order is kept within each group.
-  const ordered = [...state.jobs].sort(
+  const ordered = [...visibleJobs()].sort(
     (first, second) => Number(second.enabled) - Number(first.enabled),
   );
+
+  if (!ordered.length) {
+    const empty = document.createElement("p");
+    empty.className = "py-6 text-center text-sm text-dim";
+    empty.textContent = state.jobs.length
+      ? `No jobs on ${state.device}.`
+      : "No jobs configured yet — use Add job to create one.";
+    container.append(empty);
+    return;
+  }
 
   ordered.forEach((job) => {
     const live = liveStateFor(job);
@@ -823,7 +942,7 @@ $("#btn-clear-feed").addEventListener("click", () => {
 /** Toggle the run controls. The indicator keeps any outcome set afterwards. */
 function setRunning(running) {
   state.running = running;
-  $("#btn-run-all").disabled = running;
+  renderRunAllButton();
   $("#btn-cancel").disabled = !running;
 
   const indicator = $("#run-indicator");
@@ -870,7 +989,10 @@ async function cancelRun() {
   }
 }
 
-$("#btn-run-all").addEventListener("click", () => startRun(null, "all enabled jobs"));
+$("#btn-run-all").addEventListener("click", () => {
+  const target = runAllTarget();
+  startRun(target.selectors, target.label);
+});
 $("#btn-cancel").addEventListener("click", cancelRun);
 
 /* -- server checks ------------------------------------------------------ */
@@ -1140,6 +1262,7 @@ function openJobModal(index) {
   $("#job-enabled").checked = job.enabled !== false;
 
   syncJobModalType();
+  setPreviewVisible(false);
   openModal($("#job-modal"));
 }
 
@@ -1195,6 +1318,56 @@ $("#job-delete").addEventListener("click", async () => {
 });
 
 $("#btn-add-job").addEventListener("click", () => openJobModal(null));
+
+/* -- command preview ----------------------------------------------------- */
+
+/* The backend renders the command from a job object, so the preview reflects
+ * what is in the fields right now rather than what was last saved -- which is
+ * the point of checking excludes before letting a mirror delete anything.
+ */
+
+/** Render one argument as it would be typed into a shell. */
+function quoteArg(argument) {
+  const text = String(argument);
+  return /[\s"]/.test(text) ? `"${text.replaceAll('"', '\\"')}"` : text;
+}
+
+function setPreviewVisible(visible) {
+  $("#job-preview").hidden = !visible;
+  $("#job-preview-toggle").textContent = visible ? "Hide command" : "Preview command";
+  $("#job-preview-toggle").prepend(icon("terminal"));
+}
+
+async function refreshPreview() {
+  const output = $("#job-preview-command");
+  try {
+    const preview = await api("/api/jobs/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        job: readJobModal(),
+        dry_run: $("#dry-run").checked,
+      }),
+    });
+    output.textContent = preview.command.map(quoteArg).join(" ");
+  } catch (error) {
+    output.textContent = `Could not build the command: ${error.message}`;
+  }
+}
+
+$("#job-preview-toggle").addEventListener("click", async () => {
+  const showing = $("#job-preview").hidden;
+  setPreviewVisible(showing);
+  if (showing) await refreshPreview();
+});
+
+$("#job-preview-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#job-preview-command").textContent);
+    toast("Command copied.");
+  } catch (error) {
+    toast(`Could not copy: ${error.message}`, "error");
+  }
+});
 
 /* -- server modal ------------------------------------------------------- */
 
@@ -1287,7 +1460,9 @@ function applyConfig(payload) {
   });
 
   renderServers();
+  renderDeviceFilter();
   renderJobs();
+  renderRunAllButton();
 }
 
 async function loadConfig() {
@@ -1419,19 +1594,59 @@ $("#btn-refresh-history").addEventListener("click", loadHistory);
 
 /* -- logs --------------------------------------------------------------- */
 
-async function loadLogs() {
+/** Fill the date picker with the days that actually have a log.
+ *
+ * Today is always offered, even before anything has failed, so an empty log
+ * reads as a quiet day rather than a missing option.
+ */
+async function loadLogDates() {
+  const select = $("#log-date");
+  const wanted = select.value;
+
+  let dates = [];
+  let today = "";
   try {
-    const log = await api("/api/logs");
+    ({ dates, today } = await api("/api/logs/dates"));
+  } catch (error) {
+    pushFeed(`Could not list logs: ${error.message}`, "error");
+  }
+  if (today && !dates.includes(today)) dates = [today, ...dates];
+
+  select.textContent = "";
+  dates.forEach((date) => {
+    const option = document.createElement("option");
+    option.value = date;
+    option.textContent = date === today ? `${date} (today)` : date;
+    select.append(option);
+  });
+
+  // Keep reading the same day across a refresh, unless its log has gone.
+  select.value = dates.includes(wanted) ? wanted : (dates[0] ?? "");
+  select.disabled = dates.length < 2;
+}
+
+async function loadLogs() {
+  const date = $("#log-date").value;
+  const path = date ? `/api/logs?date=${encodeURIComponent(date)}` : "/api/logs";
+  try {
+    const log = await api(path);
     $("#log-path").textContent = log.path;
     $("#log-content").textContent = log.exists && log.lines.length
       ? log.lines.join("\n")
-      : "No failures logged today.";
+      : `No failures logged on ${log.date}.`;
   } catch (error) {
     $("#log-content").textContent = `Could not read log: ${error.message}`;
   }
 }
 
-$("#btn-refresh-logs").addEventListener("click", loadLogs);
+/** Refresh the list of days, then the day on show. */
+async function reloadLogs() {
+  await loadLogDates();
+  await loadLogs();
+}
+
+$("#log-date").addEventListener("change", loadLogs);
+$("#btn-refresh-logs").addEventListener("click", reloadLogs);
 
 /* -- start -------------------------------------------------------------- */
 
@@ -1447,7 +1662,9 @@ $("#btn-refresh-logs").addEventListener("click", loadLogs);
   await Promise.all([loadConfig(), loadHistory()]);
   state.loaded = true;
   renderServers();
+  renderDeviceFilter();
   renderJobs();
+  renderRunAllButton();
 
   connectLiveFeed();
   checkServers();

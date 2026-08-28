@@ -15,8 +15,22 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..commands import build_job_command, check_server_ssh_access
-from ..config import ConfigError, is_enabled, job_selector, load_config, save_config
-from ..logs import log_path_for_today
+from ..config import (
+    ConfigError,
+    is_enabled,
+    job_selector,
+    known_server_names,
+    load_config,
+    save_config,
+    validate_job,
+)
+from ..logs import (
+    LOG_NAME_PREFIX,
+    available_log_dates,
+    log_path_for_date,
+    log_path_for_today,
+    today_text,
+)
 from ..paths import CONFIG_PATH
 from ..stats import load_entries, summarize
 from .manager import RunManager
@@ -108,20 +122,29 @@ def create_app():
     def preview_command(payload=Body(...)):
         """Show the exact backend command a job would run.
 
-        Useful for verifying excludes and dry-run flags before touching files.
+        Takes either a `selector` naming a saved job, or a whole `job` object --
+        the editor sends the latter so the preview reflects unsaved edits.
         """
-        selector = str(payload.get("selector", ""))
         try:
             config = load_config()
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        job = next(
-            (item for item in config["sync_jobs"] if job_selector(item) == selector),
-            None,
-        )
-        if job is None:
-            raise HTTPException(status_code=404, detail=f"Unknown job '{selector}'.")
+        draft = payload.get("job")
+        if isinstance(draft, dict):
+            try:
+                validate_job(draft, known_server_names(config))
+            except ConfigError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            job = draft
+        else:
+            selector = str(payload.get("selector", ""))
+            job = next(
+                (item for item in config["sync_jobs"] if job_selector(item) == selector),
+                None,
+            )
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"Unknown job '{selector}'.")
 
         try:
             command, mode = build_job_command(
@@ -131,7 +154,7 @@ def create_app():
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"selector": selector, "parser": mode, "command": command}
+        return {"selector": job_selector(job), "parser": mode, "command": command}
 
     # -- servers -----------------------------------------------------------
 
@@ -206,17 +229,35 @@ def create_app():
         """Return aggregated totals across the whole run history."""
         return summarize()
 
+    @app.get("/api/logs/dates")
+    def failure_log_dates():
+        """List the dates that have a failure log, newest first."""
+        return {"dates": available_log_dates(), "today": today_text()}
+
     @app.get("/api/logs")
-    def failure_log():
-        """Return the tail of today's failure log."""
-        path = log_path_for_today()
+    def failure_log(date: str | None = None):
+        """Return the tail of one day's failure log, defaulting to today's."""
+        if date:
+            try:
+                path = log_path_for_date(date)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            path = log_path_for_today()
+
+        day = path.stem[len(LOG_NAME_PREFIX) :]
         if not path.is_file():
-            return {"path": str(path), "exists": False, "lines": []}
+            return {"path": str(path), "date": day, "exists": False, "lines": []}
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"path": str(path), "exists": True, "lines": lines[-LOG_TAIL_LIMIT:]}
+        return {
+            "path": str(path),
+            "date": day,
+            "exists": True,
+            "lines": lines[-LOG_TAIL_LIMIT:],
+        }
 
     # -- live feed ---------------------------------------------------------
 

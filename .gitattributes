@@ -1,0 +1,17 @@
+# Line endings.
+#
+# This is a Windows tool, so the working tree is CRLF throughout -- batch files
+# and Python alike. Git still normalizes to LF inside the repository, which is
+# what stops a file's endings from depending on whichever editor or script last
+# touched it: that drift is how app.js and input.css ended up as the only two
+# CRLF files in an otherwise LF repo, turning one-line changes into whole-file
+# diffs.
+* text=auto eol=crlf
+
+# Binary, so Git never inspects or converts it.
+*.avif binary
+
+# Compiled from styles/input.css by `npm run build:css`. Committed so running
+# the app needs Python only, but minified into one line, so keep it out of
+# diffs and language stats.
+sshsync/web/static/tailwind.css linguist-generated=true

@@ -16,6 +16,7 @@ interface follows your system theme and can be switched from the header.*
 
 ```
 python sync.py                    # run every enabled job with a live table
+python sync.py --list             # every job, with the selector that names it
 python sync.py --job Photos       # run one job
 python sync.py --dry-run          # show what would happen, change nothing
 python sync.py --stats            # historical totals
@@ -121,7 +122,14 @@ job on both backends.
 
 ### Selecting jobs
 
-Names may repeat, so selectors narrow them down:
+Names may repeat, so selectors narrow them down. `--list` prints every job with
+the selector that identifies it, when it last ran and how often it has failed:
+
+```bash
+python sync.py --list
+```
+
+Pass one to `--job` to run it:
 
 ```bash
 python sync.py --job Photos                  # unique name
@@ -133,6 +141,16 @@ python sync.py --job Photos --job Work       # repeat to select several
 An ambiguous selector fails and lists the valid alternatives rather than
 guessing which tree to overwrite.
 
+### Using another config
+
+Both entry points take `--config PATH` to read a config other than the default,
+which is otherwise set by `SSH_SYNC_CONFIG` or found beside the scripts:
+
+```bash
+python sync.py --config staging.json --list
+python serve.py --config staging.json
+```
+
 ## Web interface
 
 ```bash
@@ -142,17 +160,23 @@ python serve.py --port 9000
 
 - **Dashboard** — server cards with live reachability badges, each with buttons
   to re-probe that one server or edit it. Below them a card per job showing its
-  paths and how long ago it last ran. Each job card has a round play button that
+  paths and how long ago it last ran, filtered by device: a chip per machine
+  (plus `local` for robocopy mirrors) narrows the list to one target's jobs and
+  retargets the run-all button at it. The choice is remembered per browser. Each job card has a round play button that
   runs just that job (it becomes a stop button while the run is in flight) and a
   pencil that opens an editor modal. A finished job shows its result for three
   seconds, then settles back to "last run just now". Below them, the live
   progress table and event feed.
 - **History** — lifetime totals, per-job roll-ups and the most recent runs.
-- **Logs** — today's failure log.
+- **Logs** — the failure log for any day that has one, newest first.
 
 Configuration is edited in place: the pencil on any job or server card opens a
 modal, and saving validates the whole config before replacing the file
 atomically, confirming with a toast. Jobs are also created and deleted there.
+**Preview command** in that modal shows the exact backend command line the job
+would run — built from the fields as they stand, so unsaved edits and the
+dashboard's dry-run checkbox are both reflected. Useful for checking excludes
+before letting a mirror delete anything.
 Renaming a server rewrites every job that references it, and deleting one is
 refused while jobs still point at it.
 
@@ -171,7 +195,7 @@ choice is remembered per browser.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                 # 166 tests, no network or backends required
+pytest                 # 204 tests, no network or backends required
 ruff check .
 ruff format .
 ```
@@ -200,7 +224,7 @@ Tailwind only emits the classes it finds there.
 
 | What | Where |
 |---|---|
-| Configuration | `config.json` beside the scripts (override with `SSH_SYNC_CONFIG`) |
+| Configuration | `config.json` beside the scripts (override with `--config` or `SSH_SYNC_CONFIG`) |
 | Run history | `sync-stats.jsonl`, one JSON object per completed job |
 | Failure logs | `%LOCALAPPDATA%\SSH-Sync\logs\sync-YYYY-MM-DD.log` |
 

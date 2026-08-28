@@ -3,6 +3,7 @@
 from rich import box
 from rich.table import Table
 
+from .config import is_enabled, job_selector
 from .stats import format_aggregate_elapsed, format_ended_at
 from .utils import format_bytes
 
@@ -17,6 +18,10 @@ STATUS_STYLES = {
 
 # Longest error snippet shown inline before the failure log takes over.
 MAX_INLINE_ERROR_CHARS = 60
+
+# Stands in for a job the history has never seen, so `--list` renders it the
+# same way as any other row.
+_NEVER_RUN = {"runs": 0, "failures": 0, "last_ended_at": ""}
 
 
 def _status_text(status):
@@ -165,3 +170,45 @@ def build_history_tables(summary):
         servers.add_row(item["server"], *shared_cells(item))
 
     return overall, jobs, servers
+
+
+def build_job_list_table(jobs, summary):
+    """Build the `--list` table: every configured job and how to select it.
+
+    Selectors are the CLI's handle on a job, and the only other way to learn
+    one is to read config.json or trigger an ambiguity error on purpose.
+    """
+    history = {
+        (item["name"], item["type"], item["server"]): item for item in summary["jobs"]
+    }
+
+    table = Table(title="Configured Jobs", box=box.ROUNDED, header_style="bold")
+    # Selectors are the point of this table, so a narrow terminal wraps them
+    # rather than truncating them into something that cannot be pasted back.
+    table.add_column("Selector", style="bold white", overflow="fold")
+    table.add_column("Device")
+    table.add_column("Enabled", justify="center")
+    table.add_column("Last Run")
+    table.add_column("Runs", justify="right")
+    table.add_column("Failures", justify="right")
+
+    for job in jobs:
+        job_type = str(job.get("type", ""))
+        device = str(job.get("server", "")) if job_type == "rclone" else "local"
+        enabled = is_enabled(job)
+        record = history.get(
+            (str(job.get("name", "default")), job_type, device), _NEVER_RUN
+        )
+
+        failures = record["failures"]
+        table.add_row(
+            job_selector(job),
+            device,
+            "[green]yes[/]" if enabled else "[dim]no[/]",
+            format_ended_at(record["last_ended_at"]) or "[dim]never[/]",
+            str(record["runs"]),
+            f"[red]{failures}[/]" if failures else "0",
+            style=None if enabled else "dim",
+        )
+
+    return table

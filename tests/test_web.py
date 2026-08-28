@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sshsync import config as config_module
+from sshsync import logs as logs_module
 from sshsync import stats as stats_module
 from sshsync.web import app as app_module
 from sshsync.web import manager as manager_module
@@ -229,3 +230,108 @@ def test_index_page_is_served(client):
 def test_index_page_is_revalidated(client):
     # A cached shell paired with fresh /static assets renders a broken page.
     assert client.get("/").headers["cache-control"] == "no-cache"
+
+
+# -- command preview of an unsaved job -------------------------------------
+
+
+def test_preview_accepts_a_job_that_is_not_saved_yet(client):
+    # The editor previews what is in its fields, which may never have been saved.
+    draft = {
+        "name": "Draft",
+        "type": "robocopy",
+        "source": "C:/Draft",
+        "destination": "D:/Backup/Draft",
+        "blacklisted_dirnames": ["scratch"],
+    }
+    payload = client.post("/api/jobs/preview", json={"job": draft}).json()
+
+    assert payload["parser"] == "robocopy"
+    assert payload["selector"] == "robocopy:Draft"
+    assert "C:/Draft" in payload["command"]
+    assert "scratch" in payload["command"]
+
+
+def test_preview_of_a_draft_honours_dry_run(client):
+    draft = {
+        "name": "Draft",
+        "type": "robocopy",
+        "source": "C:/Draft",
+        "destination": "D:/Backup/Draft",
+    }
+    payload = client.post(
+        "/api/jobs/preview", json={"job": draft, "dry_run": True}
+    ).json()
+
+    assert "/L" in payload["command"]
+
+
+def test_preview_rejects_an_invalid_draft(client):
+    draft = {"name": "Draft", "type": "robocopy", "source": "", "destination": "D:/b"}
+    response = client.post("/api/jobs/preview", json={"job": draft})
+
+    assert response.status_code == 422
+    assert "source" in response.json()["detail"]
+
+
+def test_preview_rejects_a_draft_naming_an_unknown_server(client):
+    draft = {
+        "name": "Draft",
+        "type": "rclone",
+        "server": "Ghost",
+        "source": "C:/Draft",
+        "destination": "/srv/draft",
+    }
+    response = client.post("/api/jobs/preview", json={"job": draft})
+
+    assert response.status_code == 422
+    assert "Ghost" in response.json()["detail"]
+
+
+# -- dated failure logs ----------------------------------------------------
+
+
+@pytest.fixture
+def log_dir(tmp_path, monkeypatch):
+    """Point the log helpers at a temp directory holding two days of logs."""
+    directory = tmp_path / "logs"
+    directory.mkdir()
+    monkeypatch.setattr(logs_module, "LOG_DIR", directory)
+    (directory / "sync-2026-04-01.log").write_text("older failure", encoding="utf-8")
+    (directory / "sync-2026-04-02.log").write_text("newer failure", encoding="utf-8")
+    return directory
+
+
+def test_log_dates_are_listed_newest_first(client, log_dir):
+    payload = client.get("/api/logs/dates").json()
+
+    assert payload["dates"][:2] == ["2026-04-02", "2026-04-01"]
+    assert payload["today"] == logs_module.today_text()
+
+
+def test_logs_can_be_read_for_an_earlier_day(client, log_dir):
+    payload = client.get("/api/logs", params={"date": "2026-04-01"}).json()
+
+    assert payload["exists"] is True
+    assert payload["date"] == "2026-04-01"
+    assert payload["lines"] == ["older failure"]
+
+
+def test_logs_default_to_today(client, log_dir):
+    payload = client.get("/api/logs").json()
+
+    assert payload["date"] == logs_module.today_text()
+    assert payload["exists"] is False
+
+
+def test_logs_reject_a_malformed_date(client, log_dir):
+    response = client.get("/api/logs", params={"date": "01-04-2026"})
+
+    assert response.status_code == 400
+
+
+def test_logs_reject_a_date_that_escapes_the_log_directory(client, log_dir):
+    # A date is the only thing that may become a path here.
+    response = client.get("/api/logs", params={"date": "../../../../etc/passwd"})
+
+    assert response.status_code == 400

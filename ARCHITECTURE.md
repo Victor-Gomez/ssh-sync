@@ -167,6 +167,12 @@ costs the same whether the file holds ten runs or ten thousand, and a truncated
 final write only costs that one line. `summarize()` makes a single pass to feed
 the global, per-job and per-server views at once.
 
+Reading stays cheap at both ends. `load_entries(limit=N)` walks the file
+backwards in chunks and stops once it has N lines, so the dashboard asking for
+the last few hundred runs never parses the whole log. `summarize()` does have to
+read all of it, so its result is cached against the file's size and mtime: any
+append, from this process or another, misses the cache.
+
 ### Cancellation
 
 Live subprocesses are tracked in a set. `cancel()` sets an event and terminates
@@ -188,7 +194,7 @@ Nothing in `runner.py`, `cli.py` or the web layer needs to change.
 
 ## Testing
 
-166 tests, no network and no backends required — every subprocess is stubbed.
+204 tests, no network and no backends required — every subprocess is stubbed.
 
 | File | Covers |
 |---|---|
@@ -197,6 +203,8 @@ Nothing in `runner.py`, `cli.py` or the web layer needs to change.
 | `test_planner.py` | Lane grouping, dependency detection, loopback handling |
 | `test_commands.py` | argv construction, excludes, dry-run flags |
 | `test_executor.py` | Output parsing against captured backend output |
-| `test_stats.py` | History round-trips, corruption tolerance, roll-ups, migration |
+| `test_stats.py` | History round-trips, corruption tolerance, roll-ups, migration, tail reads |
+| `test_logs.py` | Log paths, date validation, the dated log index |
+| `test_cli.py` | Argument parsing, `--list`, `--config` |
 | `test_runner.py` | Ordering, skipping, failures, cancellation, events |
-| `test_web.py` | REST surface, config persistence, WebSocket handshake |
+| `test_web.py` | REST surface, config persistence, command preview, WebSocket handshake |

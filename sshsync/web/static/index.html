@@ -59,7 +59,11 @@
       <!-- Jobs ---------------------------------------------------------->
       <div class="panel">
         <div class="panel-head">
-          <h2>Jobs</h2>
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h2>Jobs</h2>
+            <!-- One chip per device, built from the config by app.js. -->
+            <div id="job-filters" class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter jobs by device"></div>
+          </div>
           <div class="flex flex-wrap items-center gap-2">
             <label class="checkbox">
               <input type="checkbox" id="dry-run">
@@ -164,7 +168,11 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Failure log</h2>
-          <button id="btn-refresh-logs" class="btn btn-ghost btn-small" data-icon="refresh">Refresh</button>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="sr-only" for="log-date">Log date</label>
+            <select class="input mono w-44 py-1 text-xs" id="log-date"></select>
+            <button id="btn-refresh-logs" class="btn btn-ghost btn-small" data-icon="refresh">Refresh</button>
+          </div>
         </div>
         <p id="log-path" class="font-mono text-xs text-dim"></p>
         <pre id="log-content" class="mt-2.5 max-h-[60vh] overflow-auto rounded-md border border-edge bg-sunken p-3.5 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">No failures logged today.</pre>
@@ -227,12 +235,23 @@
           <span>Enabled — included when running all jobs</span>
         </label>
 
+        <!-- The command the backend would actually run, built from the fields
+             above rather than from the saved config, so unsaved edits show. -->
+        <div id="job-preview" hidden>
+          <div class="mb-1.5 flex items-center justify-between gap-2">
+            <span class="text-[11px] uppercase tracking-wider text-dim">Command</span>
+            <button class="btn btn-ghost btn-small" id="job-preview-copy" data-icon="copy">Copy</button>
+          </div>
+          <pre id="job-preview-command" class="max-h-40 overflow-auto rounded-md border border-edge bg-sunken p-3 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap"></pre>
+        </div>
+
         <p class="message message-error" id="job-error" hidden></p>
       </div>
 
       <div class="flex items-center justify-between gap-3 border-t border-edge px-[18px] py-3.5">
         <button class="btn btn-danger" id="job-delete" data-icon="trash">Delete job</button>
         <div class="flex flex-wrap items-center gap-2">
+          <button class="btn btn-ghost" id="job-preview-toggle" data-icon="terminal">Preview command</button>
           <button class="btn btn-ghost" data-close data-icon="close">Cancel</button>
           <button class="btn btn-primary" id="job-save" data-icon="save">Save</button>
         </div>
@@ -337,6 +356,14 @@
     </symbol>
     <symbol id="icon-moon" viewBox="0 0 24 24">
       <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+    </symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24">
+      <polyline points="4 17 10 11 4 5"/>
+      <line x1="12" x2="20" y1="19" y2="19"/>
+    </symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24">
+      <rect width="14" height="14" x="8" y="8" rx="2"/>
+      <path d="M4 16c-1 0-2-1-2-2V4c0-1 1-2 2-2h10c1 0 2 1 2 2"/>
     </symbol>
     <symbol id="icon-pencil" viewBox="0 0 24 24">
       <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>

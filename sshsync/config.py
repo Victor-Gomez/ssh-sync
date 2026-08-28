@@ -133,6 +133,17 @@ def _validate_job(index, job, server_names):
         raise ConfigError(f"sync_jobs[{index}] references unknown server '{server_ref}'.")
 
 
+def known_server_names(config):
+    """Return the set of server names a config defines."""
+    return {str(server.get("name", "")) for server in config.get("servers") or []}
+
+
+def validate_job(job, known_servers):
+    """Validate a single job in isolation, e.g. one being edited in the browser."""
+    _validate_job(0, job, known_servers)
+    return job
+
+
 def is_enabled(job):
     """Report whether a job runs by default (jobs are enabled unless opted out)."""
     return bool(job.get("enabled", True))

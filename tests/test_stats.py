@@ -135,3 +135,84 @@ def test_legacy_store_is_migrated_once(isolated_store):
     assert [entry["name"] for entry in entries] == ["Old"]
     assert not legacy.exists()
     assert (isolated_store / "sync-stats.json.migrated").is_file()
+
+
+# -- tail reads ------------------------------------------------------------
+
+
+def test_limit_reads_only_the_tail_of_the_file(isolated_store, monkeypatch):
+    # A chunk small enough that the read has to step backwards several times.
+    monkeypatch.setattr(stats_module, "TAIL_CHUNK_BYTES", 256)
+    monkeypatch.setattr(stats_module, "TAIL_MARGIN_LINES", 2)
+    for index in range(40):
+        record(name=f"Job{index}")
+
+    assert [entry["name"] for entry in load_entries(limit=3)] == [
+        "Job37",
+        "Job38",
+        "Job39",
+    ]
+
+
+def test_limit_larger_than_the_history_returns_all_of_it():
+    for index in range(3):
+        record(name=f"Job{index}")
+    assert len(load_entries(limit=500)) == 3
+
+
+def test_limit_of_zero_returns_nothing():
+    record()
+    assert load_entries(limit=0) == []
+
+
+def test_tail_reads_skip_corrupt_lines(isolated_store, monkeypatch):
+    monkeypatch.setattr(stats_module, "TAIL_CHUNK_BYTES", 256)
+    record(name="Good1")
+    with (isolated_store / "sync-stats.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("{ truncated\n")
+    record(name="Good2")
+
+    assert [entry["name"] for entry in load_entries(limit=2)] == ["Good1", "Good2"]
+
+
+# -- summary caching -------------------------------------------------------
+
+
+def test_summary_is_recomputed_after_an_append():
+    record()
+    assert summarize()["totals"]["runs"] == 1
+
+    record()
+    # The cache is keyed on the file's size and mtime, so the new line invalidates it.
+    assert summarize()["totals"]["runs"] == 2
+
+
+def test_unchanged_history_is_only_read_once(monkeypatch):
+    record()
+    summarize()
+
+    reads = []
+    real_load = stats_module.load_entries
+    monkeypatch.setattr(
+        stats_module,
+        "load_entries",
+        lambda *args, **kwargs: reads.append(1) or real_load(*args, **kwargs),
+    )
+    summarize()
+
+    assert reads == []
+
+
+def test_cached_summary_cannot_be_mutated_by_a_caller():
+    record()
+    summarize()["totals"]["runs"] = 999
+
+    assert summarize()["totals"]["runs"] == 1
+
+
+def test_explicit_entries_bypass_the_cache():
+    record()
+    summarize()
+
+    assert summarize(entries=[])["totals"]["runs"] == 0
+    assert summarize()["totals"]["runs"] == 1

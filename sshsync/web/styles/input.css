@@ -260,6 +260,16 @@
   .pill-ok      { @apply bg-ok/15 text-ok border-ok/40; }
   .pill-fail    { @apply bg-fail/15 text-fail border-fail/40; }
 
+  /* Device filter above the job cards. Reads as a quieter sibling of .pill:
+     one is a status readout, this one is a control you click. */
+  .chip {
+    @apply cursor-pointer whitespace-nowrap rounded-full border border-edge bg-transparent
+           px-2.5 py-[3px] text-xs font-semibold text-dim transition-colors;
+  }
+  .chip:hover { @apply border-edge-strong text-fg; }
+  .chip.is-active { @apply border-brand/55 bg-brand/12 text-brand; }
+  .chip-count { @apply ml-1 tabular-nums opacity-65; }
+
   .badge { @apply whitespace-nowrap rounded-full border border-transparent px-[7px] py-0.5 text-[10px] font-bold uppercase tracking-wider; }
   .badge-ok      { @apply bg-ok/15 text-ok border-ok/35; }
   .badge-fail    { @apply bg-fail/15 text-fail border-fail/35; }

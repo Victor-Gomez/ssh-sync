@@ -1,6 +1,8 @@
 """Persistent run history, stored as an append-only JSONL log."""
 
+import copy
 import json
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -9,6 +11,30 @@ from .utils import format_elapsed, parse_elapsed_seconds
 
 # Appends run from job lanes in parallel, so serialize writes to the log.
 _WRITE_LOCK = threading.Lock()
+
+# summarize() has to read the whole history, and the dashboard asks for it on
+# every visit. Keyed on the log's identity, size and mtime, so any append --
+# from this process or another -- misses the cache and forces a fresh pass.
+_SUMMARY_CACHE = {"key": None, "value": None}
+_SUMMARY_LOCK = threading.Lock()
+
+
+def _history_fingerprint():
+    """Identify the current state of the log file, or None if unreadable."""
+    try:
+        info = STATS_PATH.stat()
+    except OSError:
+        return None
+    return (str(STATS_PATH), info.st_size, info.st_mtime_ns)
+
+
+# Bytes pulled per backwards step when reading the tail of the log. One step
+# covers a few hundred runs, so a limited read almost never needs a second.
+TAIL_CHUNK_BYTES = 65536
+
+# Extra lines read beyond the requested limit, so a handful of malformed ones
+# in the tail cannot shrink the result below what the caller asked for.
+TAIL_MARGIN_LINES = 32
 
 _AGGREGATE_FIELDS = (
     "uploaded_files",
@@ -55,36 +81,75 @@ def _migrate_legacy_store():
     )
 
 
+def _read_tail_lines(path, line_count):
+    """Return roughly the last `line_count` lines of a file, newest last.
+
+    Read backwards in chunks so the cost stays flat as the history grows: the
+    dashboard asks for a couple of hundred runs out of a log that is now
+    thousands long, and parsing all of it on every request is pure waste.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        buffer = b""
+        while position > 0 and buffer.count(b"\n") <= line_count:
+            step = min(TAIL_CHUNK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            buffer = handle.read(step) + buffer
+
+    lines = buffer.split(b"\n")
+    # Anything but a read that reached the start begins mid-line.
+    if position > 0:
+        lines = lines[1:]
+    return [line.decode("utf-8", errors="replace") for line in lines]
+
+
+def _parse_entries(lines):
+    """Turn raw log lines into entry dicts, skipping ones that do not parse.
+
+    Malformed lines are dropped rather than raised: a truncated final write
+    must not make the whole history unreadable.
+    """
+    entries = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            entries.append(item)
+    return entries
+
+
 def load_entries(limit=None):
     """Read stored runs from the log, newest last.
 
-    Malformed lines are skipped rather than raised: a truncated final write
-    must not make the whole history unreadable.
+    With a `limit`, only the tail of the file is touched.
     """
     _migrate_legacy_store()
 
     if not STATS_PATH.is_file():
         return []
 
-    entries = []
+    tailing = limit is not None and limit >= 0
+    if tailing and limit == 0:
+        return []
+
     try:
-        with STATS_PATH.open(encoding="utf-8") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(item, dict):
-                    entries.append(item)
+        if tailing:
+            lines = _read_tail_lines(STATS_PATH, limit + TAIL_MARGIN_LINES)
+        else:
+            with STATS_PATH.open(encoding="utf-8") as handle:
+                lines = handle.readlines()
     except OSError:
         return []
 
-    if limit is not None and limit >= 0:
-        return entries[-limit:]
-    return entries
+    entries = _parse_entries(lines)
+    return entries[-limit:] if tailing else entries
 
 
 def append_job_stats(job, stats, status, exit_code, source_bytes=0, dry_run=False):
@@ -164,9 +229,25 @@ def summarize(entries=None):
     A single pass feeds all three views, so the cost stays linear in history
     size even as the log grows to thousands of runs.
     """
-    if entries is None:
-        entries = load_entries()
+    if entries is not None:
+        return _summarize_entries(entries)
 
+    fingerprint = _history_fingerprint()
+    with _SUMMARY_LOCK:
+        if fingerprint is not None and _SUMMARY_CACHE["key"] == fingerprint:
+            return copy.deepcopy(_SUMMARY_CACHE["value"])
+
+    summary = _summarize_entries(load_entries())
+
+    if fingerprint is not None and fingerprint == _history_fingerprint():
+        with _SUMMARY_LOCK:
+            _SUMMARY_CACHE["key"] = fingerprint
+            _SUMMARY_CACHE["value"] = copy.deepcopy(summary)
+    return summary
+
+
+def _summarize_entries(entries):
+    """Fold history entries into the overall, per-job and per-server views."""
     totals = _new_aggregate()
     jobs = {}
     servers = {}

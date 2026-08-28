@@ -4,14 +4,16 @@ import argparse
 import sys
 import threading
 import time
+from pathlib import Path
 
 from rich.console import Console
 from rich.live import Live
 
 from .config import load_config, select_jobs
+from .paths import CONFIG_PATH
 from .runner import SyncRunner
 from .stats import summarize
-from .ui import build_history_tables, build_progress_table
+from .ui import build_history_tables, build_job_list_table, build_progress_table
 
 # Upper bound on how often the live table is re-rendered, shared across all job
 # lanes. Rendering costs ~10ms, so unbounded refreshes waste real CPU.
@@ -40,6 +42,23 @@ def parse_args(argv=None):
             "Run only selected jobs. Use NAME if unique, TYPE:NAME for "
             "type-specific selection, or TYPE:SERVER:NAME for rclone jobs that "
             "share a name across servers. Repeat to select multiple jobs."
+        ),
+    )
+    parser.add_argument(
+        "--list",
+        dest="list_jobs",
+        action="store_true",
+        help=(
+            "List every configured job with the selector that identifies it, "
+            "then exit without running anything."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            "Read a config file other than the default. Overrides the "
+            "SSH_SYNC_CONFIG environment variable."
         ),
     )
     parser.add_argument(
@@ -118,6 +137,15 @@ class LiveDisplay:
             self.refresh(force=True)
 
 
+def print_job_list(config, config_path, console=None):
+    """Print every configured job and the selector that names it."""
+    console = console or Console()
+    console.print(build_job_list_table(config["sync_jobs"], summarize()))
+    example = config["sync_jobs"][0].get("name", "NAME")
+    console.print(f"Config file: {config_path}")
+    console.print(f"Select one with [bold]--job {example}[/bold].")
+
+
 def print_stats(console=None):
     """Print the historical stats tables."""
     console = console or Console()
@@ -153,7 +181,13 @@ def main(argv=None):
         print_stats(console)
         return EXIT_OK
 
-    config = load_config()
+    config_path = Path(args.config) if args.config else CONFIG_PATH
+    config = load_config(config_path)
+
+    if args.list_jobs:
+        print_job_list(config, config_path, console)
+        return EXIT_OK
+
     selected_jobs = select_jobs(config, args.jobs)
     if not selected_jobs:
         raise RuntimeError(
