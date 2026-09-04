@@ -251,6 +251,7 @@
   .tag-skipped   { @apply bg-info/15 text-info; }
   .tag-cancelled { @apply bg-fail/15 text-fail; }
   .tag-disabled  { @apply bg-dim/12 text-dim; }
+  .tag-offline   { @apply bg-warn/15 text-warn; }
 
   /* Rounded pill: connection and run state. */
   .pill { @apply whitespace-nowrap rounded-full border border-transparent px-2.5 py-[3px] text-xs font-semibold; }

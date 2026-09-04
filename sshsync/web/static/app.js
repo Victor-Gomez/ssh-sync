@@ -307,6 +307,9 @@ function toast(message, kind = "ok") {
 const DEVICE_KEY = "sshsync-device";
 const ALL_DEVICES = "all";
 
+const STATUS_KEY = "sshsync-status";
+const ALL_STATUS = "all";
+
 function storedDevice() {
   try {
     return localStorage.getItem(DEVICE_KEY) || ALL_DEVICES;
@@ -315,17 +318,27 @@ function storedDevice() {
   }
 }
 
+function storedStatus() {
+  try {
+    return localStorage.getItem(STATUS_KEY) || ALL_STATUS;
+  } catch (error) {
+    return ALL_STATUS;  /* not fatal — the filter just resets each visit */
+  }
+}
+
 const state = {
   config: null,        // The saved config, as loaded from the server.
   jobs: [],            // Per-job summaries derived from the saved config.
   servers: [],         // Server entries from the saved config.
   serverStatus: {},    // name -> {online, reason}, from the SSH probe.
+  serverCheckedAt: {}, // name -> ISO time the probe last returned for it.
   jobHistory: {},      // "name|type|server" -> aggregate from the history.
   live: {},            // selector -> live job state during a run.
   loaded: false,       // False until the config and its history have arrived.
   running: false,
   runElapsed: "",
   device: storedDevice(),  // Device filter: "all", "local" or a server name.
+  status: storedStatus(),  // Status filter: see STATUS_FILTERS below.
 };
 
 function liveStateFor(job) {
@@ -503,7 +516,15 @@ function renderServers() {
     ).length;
     const jobs = document.createElement("div");
     jobs.className = "mt-1.5 text-xs text-dim";
-    jobs.textContent = `${jobCount} rclone job${jobCount === 1 ? "" : "s"}`;
+    jobs.append(`${jobCount} rclone job${jobCount === 1 ? "" : "s"}`);
+
+    // When the probe last spoke for this server — self-ages like the job cards.
+    const checkedAt = state.serverCheckedAt[server.name];
+    if (status === "checking") {
+      jobs.append(" · checking…");
+    } else if (checkedAt) {
+      jobs.append(" · checked ", relativeTime(checkedAt));
+    }
 
     body.append(name, meta, jobs);
 
@@ -543,6 +564,58 @@ function deviceOf(job) {
   return job.type === "rclone" ? job.server : "local";
 }
 
+/** Display label for a device: server names as-is, "local" shown as "Local". */
+function deviceLabel(device) {
+  return device === "local" ? "Local" : device;
+}
+
+/** Whether a device is reachable right now.
+ *
+ * "local" (robocopy) is always available. A server counts as reachable unless
+ * its SSH probe has come back saying otherwise — a status that is still
+ * "checking" or not yet known does not block, so nothing is gated on a probe
+ * that hasn't returned.
+ */
+function deviceOnline(device) {
+  if (device === "local") return true;
+  const status = state.serverStatus[device];
+  if (!status || status === "checking") return true;
+  return status.online !== false;
+}
+
+/** A job whose target device the SSH probe has reported as offline. */
+function jobOffline(job) {
+  return !deviceOnline(deviceOf(job));
+}
+
+/* Status filter: each key is a predicate over a job. "enabled"/"disabled" read
+ * the config flag; "online"/"offline" read the device's SSH probe. They are two
+ * different axes, so a job can be, say, both enabled and offline.
+ */
+const STATUS_FILTERS = {
+  all: () => true,
+  enabled: (job) => job.enabled,
+  disabled: (job) => !job.enabled,
+  offline: (job) => jobOffline(job),
+  online: (job) => !jobOffline(job),
+};
+const STATUS_ORDER = ["all", "enabled", "disabled", "offline", "online"];
+const STATUS_LABELS = {
+  all: "All",
+  enabled: "Enabled",
+  disabled: "Disabled",
+  offline: "Offline",
+  online: "Online",
+};
+
+/** Re-render everything the filters affect. */
+function renderFiltered() {
+  renderDeviceFilter();
+  renderStatusFilter();
+  renderJobs();
+  renderRunAllButton();
+}
+
 function setDevice(device) {
   state.device = device;
   try {
@@ -550,15 +623,41 @@ function setDevice(device) {
   } catch (error) {
     /* not fatal — the choice just lasts for this page */
   }
-  renderDeviceFilter();
-  renderJobs();
-  renderRunAllButton();
+  renderFiltered();
 }
 
-/** Jobs matching the active device filter, in config order. */
+function setStatus(status) {
+  state.status = status;
+  try {
+    localStorage.setItem(STATUS_KEY, status);
+  } catch (error) {
+    /* not fatal — the choice just lasts for this page */
+  }
+  renderFiltered();
+}
+
+/** Whether a job passes the active device filter. */
+function matchesDevice(job) {
+  return state.device === ALL_DEVICES || deviceOf(job) === state.device;
+}
+
+/** Whether a job passes the active status filter. */
+function matchesStatus(job) {
+  return (STATUS_FILTERS[state.status] || STATUS_FILTERS.all)(job);
+}
+
+/** Jobs matching both active filters, in config order. */
 function visibleJobs() {
-  if (state.device === ALL_DEVICES) return state.jobs;
-  return state.jobs.filter((job) => deviceOf(job) === state.device);
+  return state.jobs.filter((job) => matchesDevice(job) && matchesStatus(job));
+}
+
+/** Why the job list is empty, phrased around whichever filters are active. */
+function emptyFilterMessage() {
+  const status = state.status !== ALL_STATUS ? state.status : "";
+  const device =
+    state.device !== ALL_DEVICES ? ` on ${deviceLabel(state.device)}` : "";
+  if (status || device) return `No ${status ? `${status} ` : ""}jobs${device}.`;
+  return "No jobs match the current filters.";
 }
 
 /** Devices that have at least one job, local first and servers in config order. */
@@ -585,18 +684,22 @@ function renderDeviceFilter() {
   }
 
   [ALL_DEVICES, ...devices].forEach((device) => {
-    const count =
-      device === ALL_DEVICES
-        ? state.jobs.length
-        : state.jobs.filter((job) => deviceOf(job) === device).length;
+    // Counts reflect the active status filter, so each number matches what
+    // choosing this device would actually show.
+    const count = state.jobs.filter(
+      (job) =>
+        (device === ALL_DEVICES || deviceOf(job) === device) && matchesStatus(job),
+    ).length;
 
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = `chip${device === state.device ? " is-active" : ""}`;
     chip.setAttribute("aria-pressed", String(device === state.device));
     chip.dataset.tip =
-      device === ALL_DEVICES ? "Show every job" : `Show only jobs on ${device}`;
-    chip.textContent = device === ALL_DEVICES ? "All" : device;
+      device === ALL_DEVICES
+        ? "Show every device"
+        : `Show only jobs on ${deviceLabel(device)}`;
+    chip.textContent = device === ALL_DEVICES ? "All" : deviceLabel(device);
 
     const badge = document.createElement("span");
     badge.className = "chip-count";
@@ -608,16 +711,69 @@ function renderDeviceFilter() {
   });
 }
 
-/** Label and targets for the run-all button, narrowed by the active filter. */
+/* -- status filter ------------------------------------------------------ */
+
+function renderStatusFilter() {
+  const container = $("#status-filters");
+  container.textContent = "";
+
+  // Nothing to filter until there are jobs to filter.
+  if (!state.jobs.length) {
+    state.status = ALL_STATUS;
+    return;
+  }
+
+  // A stale localStorage value must not leave the list filtered to nothing.
+  if (!STATUS_FILTERS[state.status]) state.status = ALL_STATUS;
+
+  STATUS_ORDER.forEach((status) => {
+    // Counts reflect the active device filter, so each number matches what
+    // choosing this status would actually show.
+    const count = state.jobs.filter(
+      (job) => matchesDevice(job) && STATUS_FILTERS[status](job),
+    ).length;
+
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `chip${status === state.status ? " is-active" : ""}`;
+    chip.setAttribute("aria-pressed", String(status === state.status));
+    chip.dataset.tip =
+      status === ALL_STATUS
+        ? "Show every status"
+        : `Show only ${status} jobs`;
+    chip.textContent = STATUS_LABELS[status];
+
+    const badge = document.createElement("span");
+    badge.className = "chip-count";
+    badge.textContent = count;
+    chip.append(badge);
+
+    chip.addEventListener("click", () => setStatus(status));
+    container.append(chip);
+  });
+}
+
+/** Label and targets for the run-all button, narrowed by the active filter.
+ *
+ * Jobs whose device is offline are left out — they cannot run, so run-all skips
+ * them rather than failing partway through.
+ */
 function runAllTarget() {
-  const jobs = visibleJobs().filter((job) => job.enabled);
+  const jobs = visibleJobs().filter((job) => job.enabled && !jobOffline(job));
   if (state.device === ALL_DEVICES) {
-    return { label: "all enabled jobs", selectors: null, text: "Run all enabled" };
+    // A null selector tells the server "every enabled job"; only spell the list
+    // out explicitly when some enabled job must be skipped for being offline.
+    const anyOffline = state.jobs.some((job) => job.enabled && jobOffline(job));
+    return {
+      label: "all reachable jobs",
+      selectors: anyOffline ? jobs.map((job) => job.selector) : null,
+      text: "Run all enabled",
+    };
   }
   return {
-    label: `${jobs.length} job(s) on ${state.device}`,
+    label: `${jobs.length} job(s) on ${deviceLabel(state.device)}`,
     selectors: jobs.map((job) => job.selector),
-    text: `Run all on ${state.device}`,
+    text: `Run all on ${deviceLabel(state.device)}`,
   };
 }
 
@@ -721,7 +877,7 @@ function renderJobs() {
     const empty = document.createElement("p");
     empty.className = "py-6 text-center text-sm text-dim";
     empty.textContent = state.jobs.length
-      ? `No jobs on ${state.device}.`
+      ? emptyFilterMessage()
       : "No jobs configured yet — use Add job to create one.";
     container.append(empty);
     return;
@@ -730,19 +886,24 @@ function renderJobs() {
   ordered.forEach((job) => {
     const live = liveStateFor(job);
     const isRunning = live?.status === "RUNNING";
+    const offline = jobOffline(job);
 
     const card = document.createElement("div");
     card.dataset.card = "job";
     card.className = [
       JOB_CARD_CLASS,
       "transition-colors",
-      // The border carries the job's state: amber mid-run, red on failure.
+      // The border carries the job's state: amber mid-run or when the target
+      // device is offline, red on failure.
       isRunning
         ? "border-warn/50"
         : live?.status === "FAIL"
           ? "border-fail/45"
-          : "border-edge hover:border-edge-strong",
-      job.enabled ? "" : "opacity-55",
+          : offline
+            ? "border-warn/40"
+            : "border-edge hover:border-edge-strong",
+      // Offline jobs are dimmed like disabled ones — they cannot run right now.
+      job.enabled && !offline ? "" : "opacity-55",
     ].join(" ");
 
     /* Body ------------------------------------------------------------- */
@@ -769,6 +930,14 @@ function renderJobs() {
       disabled.className = "tag tag-disabled";
       disabled.textContent = "Disabled";
       head.append(disabled);
+    }
+
+    if (offline) {
+      const off = document.createElement("span");
+      off.className = "tag tag-offline";
+      off.textContent = "Offline";
+      off.dataset.tip = `${deviceOf(job)} is offline`;
+      head.append(off);
     }
 
     if (live && live.status !== "PENDING") {
@@ -809,13 +978,18 @@ function renderJobs() {
       run.setAttribute("aria-label", `Stop ${job.name}`);
       run.addEventListener("click", cancelRun);
     } else {
-      // Only one run at a time, so every other job's play button waits.
-      run.disabled = state.running;
-      run.dataset.tip = state.running
-        ? "Another run is in progress"
-        : `Run ${job.name}`;
+      // A job cannot run while its device is offline, and only one run happens
+      // at a time — so every other job's play button waits.
+      run.disabled = state.running || offline;
+      run.dataset.tip = offline
+        ? `${deviceOf(job)} is offline`
+        : state.running
+          ? "Another run is in progress"
+          : `Run ${job.name}`;
       run.setAttribute("aria-label", `Run ${job.name}`);
-      run.addEventListener("click", () => startRun([job.selector], job.name));
+      if (!offline) {
+        run.addEventListener("click", () => startRun([job.selector], job.name));
+      }
     }
 
     const edit = document.createElement("button");
@@ -997,28 +1171,45 @@ $("#btn-cancel").addEventListener("click", cancelRun);
 
 /* -- server checks ------------------------------------------------------ */
 
-/** Probe servers over SSH. Pass names to re-check just those. */
-async function checkServers(names = null) {
+/** Whether a probe is in flight, so the auto-recheck timer can stand down. */
+let checkInFlight = false;
+
+/** Probe servers over SSH. Pass names to re-check just those.
+ *
+ * `silent` suppresses the toasts, for the background auto-recheck that would
+ * otherwise announce itself every interval.
+ */
+async function checkServers(names = null, { silent = false } = {}) {
   const targets = names || state.servers.map((server) => server.name);
-  targets.forEach((name) => {
-    state.serverStatus[name] = "checking";
-  });
-  renderServers();
+  checkInFlight = true;
+  // A background refresh keeps the last known badges up while it re-probes;
+  // only a user-driven check shows the "Checking" placeholder.
+  if (!silent) {
+    targets.forEach((name) => {
+      state.serverStatus[name] = "checking";
+    });
+    renderServers();
+    renderFiltered();
+  }
 
   try {
     const { servers } = await api("/api/servers/check", {
       method: "POST",
       body: JSON.stringify({ names }),
     });
+    const now = new Date().toISOString();
     servers.forEach((server) => {
       state.serverStatus[server.name] = {
         online: server.online,
         reason: server.reason,
       };
+      state.serverCheckedAt[server.name] = now;
     });
 
     const offline = servers.filter((server) => !server.online);
-    if (servers.length === 1) {
+    if (silent) {
+      /* background refresh — the cards speak for themselves */
+    } else if (servers.length === 1) {
       const [server] = servers;
       toast(
         server.online ? `${server.name} is online.` : `${server.name} is offline.`,
@@ -1031,14 +1222,34 @@ async function checkServers(names = null) {
       );
     }
   } catch (error) {
-    // Drop the spinner rather than leaving stale "Checking" badges behind.
-    targets.forEach((name) => delete state.serverStatus[name]);
-    toast(`Server check failed: ${error.message}`, "error");
+    // A user-driven check drops its spinner rather than leaving stale
+    // "Checking" badges; a silent refresh keeps the last known status instead
+    // of blanking a card to "Unknown" over one transient failure.
+    if (!silent) {
+      targets.forEach((name) => delete state.serverStatus[name]);
+      toast(`Server check failed: ${error.message}`, "error");
+    }
+  } finally {
+    checkInFlight = false;
   }
   renderServers();
+  renderFiltered();
 }
 
 $("#btn-check-servers").addEventListener("click", () => checkServers());
+
+/* Keep server status fresh on its own, so offline devices (and the run buttons
+ * they gate) don't go stale between manual checks. Stand down while a run is on,
+ * while another check is in flight, and while the tab is hidden — no point
+ * probing a page nobody is looking at.
+ */
+const AUTO_RECHECK_MS = 60000;
+
+setInterval(() => {
+  if (!state.loaded || state.running || checkInFlight) return;
+  if (document.hidden || !state.servers.length) return;
+  checkServers(null, { silent: true });
+}, AUTO_RECHECK_MS);
 
 /* -- live feed ---------------------------------------------------------- */
 
@@ -1460,9 +1671,7 @@ function applyConfig(payload) {
   });
 
   renderServers();
-  renderDeviceFilter();
-  renderJobs();
-  renderRunAllButton();
+  renderFiltered();
 }
 
 async function loadConfig() {
@@ -1662,9 +1871,7 @@ $("#btn-refresh-logs").addEventListener("click", reloadLogs);
   await Promise.all([loadConfig(), loadHistory()]);
   state.loaded = true;
   renderServers();
-  renderDeviceFilter();
-  renderJobs();
-  renderRunAllButton();
+  renderFiltered();
 
   connectLiveFeed();
   checkServers();
