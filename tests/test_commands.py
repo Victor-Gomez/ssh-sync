@@ -4,11 +4,17 @@ import pytest
 
 from sshsync import commands
 from sshsync.commands import (
+    DEFAULT_CHECKERS,
+    DEFAULT_TRANSFERS,
     GLOBAL_EXCLUDED_DIRNAMES,
+    MAX_CHECKERS,
+    MAX_TRANSFERS,
+    MIN_TRANSFERS,
     build_filters,
     build_job_command,
     build_rclone_command,
     build_robocopy_command,
+    compute_rclone_concurrency,
     create_temp_rclone_config,
     merge_excludes,
 )
@@ -73,6 +79,56 @@ def test_rclone_command_targets_the_generated_remote():
     assert command[2] == "sync"
     assert command[4] == "syncremote:/D:/Backup/Docs"
     assert "--delete-during" in command
+
+
+def _flag_value(command, flag):
+    for part in command:
+        if part.startswith(f"{flag}="):
+            return int(part.split("=", 1)[1])
+    raise AssertionError(f"{flag} not in command")
+
+
+def test_rclone_concurrency_defaults_when_not_supplied():
+    command = build_rclone_command(RCLONE_JOB, "x.conf")
+    assert _flag_value(command, "--transfers") == DEFAULT_TRANSFERS
+    assert _flag_value(command, "--checkers") == DEFAULT_CHECKERS
+
+
+def test_rclone_concurrency_uses_computed_values():
+    command = build_rclone_command(RCLONE_JOB, "x.conf", transfers=48, checkers=100)
+    assert _flag_value(command, "--transfers") == 48
+    assert _flag_value(command, "--checkers") == 100
+
+
+def test_rclone_concurrency_job_override_beats_default():
+    job = {**RCLONE_JOB, "transfers": 12, "checkers": 40}
+    command = build_rclone_command(job, "x.conf")
+    assert _flag_value(command, "--transfers") == 12
+    assert _flag_value(command, "--checkers") == 40
+
+
+def test_concurrency_empty_tree_falls_back_to_default():
+    assert compute_rclone_concurrency(0, 0) == (DEFAULT_TRANSFERS, DEFAULT_CHECKERS)
+
+
+def test_concurrency_many_tiny_files_over_wan_pushes_high():
+    # 50k files averaging ~4 KiB, 60 ms away: the small-file/WAN worst case.
+    transfers, checkers = compute_rclone_concurrency(50_000, 50_000 * 4096, 60.0)
+    assert transfers == MAX_TRANSFERS
+    assert checkers >= transfers
+
+
+def test_concurrency_large_files_on_lan_stays_modest():
+    # A handful of big media files on a sub-millisecond LAN needs little overlap.
+    transfers, checkers = compute_rclone_concurrency(6, 6 * 200 * 1024**2, 0.4)
+    assert transfers == MIN_TRANSFERS
+    assert checkers >= transfers
+
+
+def test_concurrency_is_bounded():
+    transfers, checkers = compute_rclone_concurrency(1_000_000, 1_000_000 * 100, 500.0)
+    assert MIN_TRANSFERS <= transfers <= MAX_TRANSFERS
+    assert checkers <= MAX_CHECKERS
 
 
 def test_rclone_dry_run_adds_the_flag():

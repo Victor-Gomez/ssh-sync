@@ -15,7 +15,9 @@ from concurrent.futures import wait as wait_for_futures
 from .commands import (
     build_job_command,
     check_server_ssh_access,
+    compute_rclone_concurrency,
     create_temp_rclone_config,
+    measure_latency_ms,
 )
 from .config import job_selector
 from .executor import new_stats, stream_command
@@ -27,11 +29,17 @@ from .utils import (
     format_elapsed,
     get_directory_size_bytes,
     is_failed_exit_code,
+    profile_directory,
 )
 
 # Source trees usually live on different physical drives, so measuring a few at
 # once is faster than walking them one after another.
 MAX_SIZING_WORKERS = 4
+
+# Cap the pre-sync profiling walk used to tune rclone concurrency. Past this many
+# files the tuning is already saturated (see compute_rclone_concurrency), so the
+# rest of the walk would only delay the job it is meant to speed up.
+CONCURRENCY_FILE_CAP = 25_000
 
 # How often a lane checks whether the job it depends on has finished. Polling
 # beats a blocking wait because an untimed lock acquire is not interruptible by
@@ -133,6 +141,10 @@ class SyncRunner:
         self._failures = []
         self._log_paths = set()
         self._failures_lock = threading.Lock()
+        # Latency is a per-server property, so probe each server once and reuse
+        # the reading across all of its jobs.
+        self._latency_ms = {}
+        self._latency_lock = threading.Lock()
 
     # -- events ------------------------------------------------------------
 
@@ -287,12 +299,17 @@ class SyncRunner:
             max_workers=len(server_names), thread_name_prefix="ssh-check"
         ) as pool:
             futures = {
-                name: pool.submit(check_server_ssh_access, self.servers_by_name[name])
+                name: pool.submit(self._probe_server, self.servers_by_name[name])
                 for name in server_names
             }
             for name, future in futures.items():
-                reachable, reason = future.result()
-                if not reachable:
+                reachable, reason, latency = future.result()
+                if reachable:
+                    # Cache latency now, alongside the reachability check, so no
+                    # job pays a probe on its own critical path.
+                    with self._latency_lock:
+                        self._latency_ms[name] = latency
+                else:
                     offline[name] = reason
                     self.emit(
                         "log",
@@ -301,6 +318,17 @@ class SyncRunner:
                     )
 
         return offline
+
+    @staticmethod
+    def _probe_server(server):
+        """Check reachability and, if up, measure latency in one pooled task.
+
+        Returns `(reachable, reason, latency_ms)`; latency is `None` when the
+        server is offline (nothing to probe) or the reading fails.
+        """
+        reachable, reason = check_server_ssh_access(server)
+        latency = measure_latency_ms(server) if reachable else None
+        return reachable, reason, latency
 
     def _mark_offline_jobs(self, offline_servers):
         """Mark jobs on unreachable servers as skipped; return the runnable ones."""
@@ -421,6 +449,53 @@ class SyncRunner:
                     return False
         return True
 
+    def _server_latency_ms(self, server_name):
+        """Round-trip time to a server, probed once and cached for the run."""
+        with self._latency_lock:
+            if server_name in self._latency_ms:
+                return self._latency_ms[server_name]
+
+        server = self.servers_by_name.get(server_name)
+        latency = measure_latency_ms(server) if server else None
+
+        with self._latency_lock:
+            self._latency_ms[server_name] = latency
+        return latency
+
+    def _rclone_concurrency(self, job):
+        """Compute `(transfers, checkers)` for an rclone job at run time.
+
+        Returns `(None, None)` for non-rclone jobs so the builder keeps its own
+        defaults. A job may pin explicit `transfers`/`checkers` in config, which
+        skips profiling entirely.
+        """
+        if str(job.get("type", "")).lower() != "rclone":
+            return None, None
+        if job.get("transfers") or job.get("checkers"):
+            return job.get("transfers"), job.get("checkers")
+
+        source = expand_path(str(job.get("source", "")))
+        file_count, total_bytes = profile_directory(
+            source, file_cap=CONCURRENCY_FILE_CAP
+        )
+        latency = self._server_latency_ms(job.get("server"))
+        transfers, checkers = compute_rclone_concurrency(
+            file_count, total_bytes, latency
+        )
+
+        capped = "+" if file_count >= CONCURRENCY_FILE_CAP else ""
+        latency_text = f"{latency:.0f}ms" if latency is not None else "unknown"
+        self.emit(
+            "log",
+            level="info",
+            message=(
+                f"Job '{job.get('name')}' tuned rclone: {file_count}{capped} files, "
+                f"{latency_text} latency -> --transfers={transfers} "
+                f"--checkers={checkers}"
+            ),
+        )
+        return transfers, checkers
+
     def _run_job(self, index, rclone_configs, size_futures):
         """Execute a single job and record its outcome."""
         job = self.jobs[index]
@@ -430,10 +505,13 @@ class SyncRunner:
         state["status"] = STATUS_RUNNING
         self._emit_job(index)
 
+        transfers, checkers = self._rclone_concurrency(job)
         command, parser_mode = build_job_command(
             job,
             rclone_config_path=rclone_configs.get(job.get("server")),
             dry_run=self.dry_run,
+            transfers=transfers,
+            checkers=checkers,
         )
 
         def on_update(current_stats):

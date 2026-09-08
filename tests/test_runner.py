@@ -56,8 +56,11 @@ def stubs(monkeypatch):
             on_update(dict(stats))
         return calls["exit_codes"].get(name, 0), stats
 
-    def fake_build(job, rclone_config_path=None, dry_run=False):
+    def fake_build(
+        job, rclone_config_path=None, dry_run=False, transfers=None, checkers=None
+    ):
         mode = "robocopy" if job["type"] == "robocopy" else "rclone"
+        calls.setdefault("concurrency", []).append((transfers, checkers))
         return ["backend", "--dry" if dry_run else "--go", job["name"]], mode
 
     monkeypatch.setattr(runner_module, "stream_command", fake_stream)
@@ -65,6 +68,10 @@ def stubs(monkeypatch):
     monkeypatch.setattr(runner_module, "create_temp_rclone_config", lambda s: "cfg")
     monkeypatch.setattr(runner_module, "check_server_ssh_access", lambda s: (True, ""))
     monkeypatch.setattr(runner_module, "get_directory_size_bytes", lambda p: 4096)
+    # Keep tuning off the network and off the disk so orchestration tests stay
+    # fast and deterministic.
+    monkeypatch.setattr(runner_module, "measure_latency_ms", lambda s: 5.0)
+    monkeypatch.setattr(runner_module, "profile_directory", lambda p, **kw: (3, 300))
     monkeypatch.setattr(runner_module, "write_failure_log", lambda *a: "C:/log.txt")
     monkeypatch.setattr(
         runner_module,
@@ -93,6 +100,36 @@ def test_source_size_is_measured_and_recorded(stubs):
     assert result.job_states[0]["source_bytes"] == 4096
 
 
+def test_latency_is_probed_once_per_server_during_the_check(stubs, monkeypatch):
+    # Two rclone jobs share the NAS: latency belongs to the reachability phase,
+    # so it must be measured once up front, not once per job.
+    probes = []
+    monkeypatch.setattr(
+        runner_module,
+        "measure_latency_ms",
+        lambda server: probes.append(server["name"]) or 5.0,
+    )
+    jobs = [rclone("A", server="NAS"), rclone("B", server="NAS")]
+    SyncRunner(CONFIG, jobs).run()
+
+    assert probes == ["NAS"]
+    # Both jobs were tuned with the cached reading (5 ms -> LAN factor 1.0).
+    assert stubs["concurrency"] == [(32, 32), (32, 32)]
+
+
+def test_offline_server_is_not_latency_probed(stubs, monkeypatch):
+    monkeypatch.setattr(
+        runner_module, "check_server_ssh_access", lambda s: (False, "down")
+    )
+    probed = []
+    monkeypatch.setattr(
+        runner_module, "measure_latency_ms", lambda server: probed.append(1)
+    )
+    SyncRunner(CONFIG, [rclone("A", server="NAS")]).run()
+
+    assert probed == []
+
+
 def test_job_states_carry_their_selector(stubs):
     # The web UI matches live progress to its cards by selector.
     result = SyncRunner(CONFIG, [robocopy("A"), rclone("B")]).run()
@@ -107,7 +144,7 @@ def test_dry_run_is_passed_to_the_builder(stubs, monkeypatch):
     monkeypatch.setattr(
         runner_module,
         "build_job_command",
-        lambda job, rclone_config_path=None, dry_run=False: (
+        lambda job, rclone_config_path=None, dry_run=False, transfers=None, checkers=None: (
             seen.append(dry_run) or (["backend", job["name"]], "robocopy")
         ),
     )

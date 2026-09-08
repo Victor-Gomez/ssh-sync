@@ -2,12 +2,29 @@
 
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .paths import PROJECT_ROOT
 from .utils import expand_path, normalize_remote_path, require_job_value
+
+# Fallback rclone concurrency, used when the tree cannot be profiled (empty or
+# unreadable source) or when no override is supplied.
+DEFAULT_TRANSFERS = 8
+DEFAULT_CHECKERS = 16
+
+# Bounds for the dynamically computed values. The ceilings keep a pathological
+# tree (huge, tiny-file) from spawning so many SFTP requests that the server or
+# the local FD limit becomes the bottleneck.
+MIN_TRANSFERS, MAX_TRANSFERS = 4, 64
+MIN_CHECKERS, MAX_CHECKERS = 8, 128
+
+# Round-trip time assumed when a server cannot be probed, so tuning still leans
+# on file structure rather than collapsing to the minimum.
+ASSUMED_LATENCY_MS = 20.0
 
 # Robocopy copies with a single thread unless told otherwise. On large trees the
 # scan dominates, and 16 threads cut the Projects job's listing pass from 6.9s to
@@ -149,6 +166,111 @@ def check_server_ssh_access(server, timeout_seconds=4):
     return False, f"Server '{server_name}' is not reachable via SSH: {last_error}"
 
 
+def measure_latency_ms(server, samples=3, timeout_seconds=2.0):
+    """Estimate round-trip time to a server, or `None` if it cannot be reached.
+
+    A TCP connect to the SSH port costs roughly one round trip (SYN/SYN-ACK),
+    which is all we need as a topology signal: a LAN NAS answers in well under a
+    millisecond, a WAN host in tens. We take the best of a few samples so a
+    single scheduling hiccup does not inflate the reading.
+    """
+    host = str(server.get("host", "")).strip()
+    if not host:
+        return None
+    try:
+        port = int(str(server.get("port", 22)).strip() or 22)
+    except ValueError:
+        port = 22
+
+    for candidate_host in _ssh_candidate_hosts(host):
+        best = None
+        reached = False
+        for _ in range(max(1, samples)):
+            start = time.perf_counter()
+            try:
+                with socket.create_connection(
+                    (candidate_host, port), timeout=timeout_seconds
+                ):
+                    pass
+            except OSError:
+                break
+            reached = True
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            best = elapsed_ms if best is None else min(best, elapsed_ms)
+        if reached:
+            return best
+    return None
+
+
+def compute_rclone_concurrency(file_count, total_bytes, latency_ms=None):
+    """Derive `(transfers, checkers)` from tree shape and network latency.
+
+    The reasoning, not the exact constants, is what matters here:
+
+    * Average file size sets the base parallelism. Tiny files are latency-bound
+      -- throughput is capped by per-file round trips, which overlap well, so
+      more transfers help. Large files are bandwidth-bound, so a handful is
+      plenty and piling on more just adds contention.
+    * Latency scales that base. The higher the round-trip time, the more each
+      transfer stalls waiting on the wire, so more of them are needed to keep
+      the link busy. On a LAN the reverse holds and a smaller pool suffices.
+    * File *count* (not size) drives the checker pool, since the compare pass is
+      one stat round trip per file. Checkers never drop below transfers.
+
+    The numbers are deliberately coarse buckets -- this is a heuristic, and
+    over-precision would be false confidence.
+    """
+    if not file_count or file_count <= 0:
+        return DEFAULT_TRANSFERS, DEFAULT_CHECKERS
+
+    avg_bytes = (total_bytes / file_count) if total_bytes else 0
+    latency = ASSUMED_LATENCY_MS if latency_ms is None else max(float(latency_ms), 0.1)
+
+    if avg_bytes < 64 * 1024:
+        base_transfers = 32
+    elif avg_bytes < 1024 * 1024:
+        base_transfers = 16
+    elif avg_bytes < 16 * 1024 * 1024:
+        base_transfers = 8
+    else:
+        base_transfers = 4
+
+    if latency < 2:
+        latency_factor = 0.5  # LAN
+    elif latency < 10:
+        latency_factor = 1.0
+    elif latency < 40:
+        latency_factor = 1.5
+    else:
+        latency_factor = 2.0  # WAN
+
+    transfers = _clamp(
+        round(base_transfers * latency_factor), MIN_TRANSFERS, MAX_TRANSFERS
+    )
+
+    if file_count < 1_000:
+        base_checkers = 16
+    elif file_count < 10_000:
+        base_checkers = 32
+    elif file_count < 100_000:
+        base_checkers = 64
+    else:
+        base_checkers = 96
+
+    checkers = _clamp(
+        round(base_checkers * latency_factor), MIN_CHECKERS, MAX_CHECKERS
+    )
+    # A checker pool smaller than the transfer pool would bottleneck the compare
+    # pass that gates the transfers.
+    checkers = max(checkers, transfers)
+
+    return transfers, checkers
+
+
+def _clamp(value, low, high):
+    return max(low, min(high, int(value)))
+
+
 def create_temp_rclone_config(server):
     """Write a throwaway rclone config for one server and return its path.
 
@@ -190,8 +312,27 @@ def create_temp_rclone_config(server):
     return path
 
 
-def build_rclone_command(job, rclone_config_path, dry_run=False):
-    """Build the rclone sync command for a job."""
+def _resolve_concurrency(job, transfers, checkers):
+    """Pick the transfers/checkers to use: explicit arg, then job override, then
+    the static fallback. A caller passing computed values wins; a job may still
+    pin its own via `transfers`/`checkers` config keys."""
+    transfers = transfers if transfers is not None else job.get("transfers")
+    checkers = checkers if checkers is not None else job.get("checkers")
+    transfers = int(transfers) if transfers else DEFAULT_TRANSFERS
+    checkers = int(checkers) if checkers else DEFAULT_CHECKERS
+    return transfers, checkers
+
+
+def build_rclone_command(
+    job, rclone_config_path, dry_run=False, transfers=None, checkers=None
+):
+    """Build the rclone sync command for a job.
+
+    `transfers`/`checkers` override the concurrency; when omitted they fall back
+    to a job-level config value and then to the static default. The runner
+    normally computes them per run from tree shape and network latency (see
+    `compute_rclone_concurrency`).
+    """
     rclone_exe = _resolve_executable(
         "rclone", "rclone.exe", fallback=PROJECT_ROOT / "rclone.exe"
     )
@@ -200,6 +341,7 @@ def build_rclone_command(job, rclone_config_path, dry_run=False):
 
     source_dir = expand_path(require_job_value(job, "source", "rclone"))
     destination = normalize_remote_path(require_job_value(job, "destination", "rclone"))
+    transfers, checkers = _resolve_concurrency(job, transfers, checkers)
 
     command = [
         rclone_exe,
@@ -211,8 +353,8 @@ def build_rclone_command(job, rclone_config_path, dry_run=False):
         # No --fast-list: the SFTP backend does not implement ListR, so rclone
         # ignores the flag entirely.
         "--create-empty-src-dirs",
-        "--transfers=8",
-        "--checkers=16",
+        f"--transfers={transfers}",
+        f"--checkers={checkers}",
         "--log-level=NOTICE",
         "--stats=1s",
         "--stats-log-level=NOTICE",
@@ -271,7 +413,9 @@ def build_robocopy_command(job, dry_run=False):
     return command
 
 
-def build_job_command(job, rclone_config_path=None, dry_run=False):
+def build_job_command(
+    job, rclone_config_path=None, dry_run=False, transfers=None, checkers=None
+):
     """Build the command for any job, returning `(command, parser_mode)`."""
     job_type = str(job.get("type", "")).lower()
 
@@ -283,6 +427,15 @@ def build_job_command(job, rclone_config_path=None, dry_run=False):
             raise RuntimeError(
                 f"No rclone config available for job '{job.get('name', 'default')}'."
             )
-        return build_rclone_command(job, rclone_config_path, dry_run=dry_run), "rclone"
+        return (
+            build_rclone_command(
+                job,
+                rclone_config_path,
+                dry_run=dry_run,
+                transfers=transfers,
+                checkers=checkers,
+            ),
+            "rclone",
+        )
 
     raise RuntimeError(f"Unsupported job type '{job_type}'.")

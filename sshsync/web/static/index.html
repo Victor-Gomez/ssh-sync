@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SSH-Sync</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128260;</text></svg>">
+  <!-- `#` in the fill colour is written `%23` so it does not start a URL fragment. -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 90 90'><path d='m0 0 30 15-15 8.333v43.334L60 45v15L0 90Z' fill='%233b82f6'/><path d='M90 0v90L60 75l15-8.333V23.333L30 45V30Z' fill='%233b82f6'/></svg>">
   <link rel="stylesheet" href="/static/tailwind.css">
   <!-- Resolve the theme before the first paint, otherwise the page flashes the
        default palette before app.js runs. Kept inline and dependency-free for
@@ -23,7 +24,13 @@
   <div class="sticky top-0 z-20 bg-panel">
     <header class="flex items-center justify-between gap-4 border-b border-edge px-3.5 py-3.5 sm:px-6">
       <div class="flex items-center gap-2.5">
-        <span class="size-2.5 rounded-full bg-brand shadow-[0_0_0_4px_rgba(59,130,246,0.18)]" aria-hidden="true"></span>
+        <!-- Filled from the brand token directly: the `text-brand` utility is not
+             emitted in the prebuilt CSS (only used via @apply), so currentColor
+             would fall back to the header text colour. -->
+        <svg class="shrink-0" viewBox="0 0 90 90" style="width: 32px; height: 32px; fill: var(--color-brand)" aria-hidden="true">
+          <path d="m0 0 30 15-15 8.333v43.334L60 45v15L0 90Z"/>
+          <path d="M90 0v90L60 75l15-8.333V23.333L30 45V30Z"/>
+        </svg>
         <h1>SSH-Sync</h1>
       </div>
       <div class="flex items-center gap-2">

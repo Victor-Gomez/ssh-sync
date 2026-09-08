@@ -87,12 +87,18 @@ def parse_elapsed_seconds(elapsed_value):
     return total
 
 
-def get_directory_size_bytes(path_value):
-    """Recursively total the size of a directory tree, skipping symlinks.
+def profile_directory(path_value, file_cap=None):
+    """Walk a directory tree once, returning `(file_count, total_bytes)`.
 
-    Unreadable entries are skipped rather than raised: this figure is only a
-    display aid, so a locked file must not abort the walk.
+    Symlinks are skipped and unreadable entries ignored, exactly as
+    `get_directory_size_bytes` does: the figures are advisory (a display aid and
+    a concurrency hint), so a locked file must not abort the walk.
+
+    `file_cap`, when set, stops the walk once that many files have been counted.
+    Past the cap the tree is already firmly "many small files", so the tuning it
+    feeds is saturated and walking the rest only burns time.
     """
+    file_count = 0
     total_size = 0
     # Keep the stack as plain strings: os.scandir accepts them directly and this
     # avoids building a Path object for every directory in the tree.
@@ -107,6 +113,7 @@ def get_directory_size_bytes(path_value):
                         if entry.is_symlink():
                             continue
                         if entry.is_file(follow_symlinks=False):
+                            file_count += 1
                             total_size += entry.stat(follow_symlinks=False).st_size
                         elif entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
@@ -115,6 +122,19 @@ def get_directory_size_bytes(path_value):
         except OSError:
             continue
 
+        if file_cap is not None and file_count >= file_cap:
+            return file_count, total_size
+
+    return file_count, total_size
+
+
+def get_directory_size_bytes(path_value):
+    """Recursively total the size of a directory tree, skipping symlinks.
+
+    Unreadable entries are skipped rather than raised: this figure is only a
+    display aid, so a locked file must not abort the walk.
+    """
+    _, total_size = profile_directory(path_value)
     return total_size
 
 
