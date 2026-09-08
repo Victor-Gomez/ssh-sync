@@ -5,6 +5,8 @@ run control and history endpoints.
 """
 
 import json
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +14,11 @@ from fastapi.testclient import TestClient
 from sshsync import config as config_module
 from sshsync import logs as logs_module
 from sshsync import stats as stats_module
+from sshsync.config import job_selector
 from sshsync.web import app as app_module
 from sshsync.web import manager as manager_module
 from sshsync.web.app import create_app
+from sshsync.web.manager import RunManager
 
 
 @pytest.fixture
@@ -103,37 +107,195 @@ def test_status_starts_idle(client):
     assert status["jobs"] == []
 
 
-def test_run_starts_a_job_batch(client, monkeypatch):
-    started = {}
+def test_run_submits_a_single_request(client, monkeypatch):
+    submitted = {}
 
-    def fake_start(self, selectors=None, dry_run=False):
-        started["selectors"] = selectors
-        started["dry_run"] = dry_run
-        return {"running": True, "jobs": []}
+    def fake_submit(self, items):
+        submitted["items"] = items
+        return {"running": True, "jobs": [], "queue": []}
 
-    monkeypatch.setattr(manager_module.RunManager, "start", fake_start)
+    monkeypatch.setattr(manager_module.RunManager, "submit", fake_submit)
     response = client.post(
         "/api/run", json={"selectors": ["robocopy:Docs"], "dry_run": True}
     )
 
     assert response.status_code == 200
-    assert started == {"selectors": ["robocopy:Docs"], "dry_run": True}
+    assert submitted["items"] == [{"selectors": ["robocopy:Docs"], "dry_run": True}]
 
 
-def test_run_conflicts_when_one_is_already_active(client, monkeypatch):
-    def busy(self, selectors=None, dry_run=False):
-        raise RuntimeError("A sync run is already in progress.")
+def test_run_accepts_a_batch_of_requests(client, monkeypatch):
+    submitted = {}
 
-    monkeypatch.setattr(manager_module.RunManager, "start", busy)
-    response = client.post("/api/run", json={})
+    def fake_submit(self, items):
+        submitted["items"] = items
+        return {"running": True, "queue": []}
 
-    assert response.status_code == 409
-    assert "already in progress" in response.json()["detail"]
+    monkeypatch.setattr(manager_module.RunManager, "submit", fake_submit)
+    client.post(
+        "/api/run",
+        json={
+            "items": [
+                {"selectors": ["robocopy:Docs"]},
+                {"selectors": ["rclone:NAS:Docs"], "dry_run": True},
+            ]
+        },
+    )
+
+    assert submitted["items"] == [
+        {"selectors": ["robocopy:Docs"], "dry_run": False},
+        {"selectors": ["rclone:NAS:Docs"], "dry_run": True},
+    ]
 
 
 def test_run_reports_bad_selectors(client):
     response = client.post("/api/run", json={"selectors": ["Nope"]})
     assert response.status_code == 422
+
+
+def test_queue_remove_requires_an_integer_id(client):
+    assert client.post("/api/queue/remove", json={}).status_code == 400
+    assert client.post("/api/queue/remove", json={"id": "5"}).status_code == 400
+
+
+def test_queue_remove_calls_dequeue(client, monkeypatch):
+    removed = {}
+
+    def fake_dequeue(self, entry_id):
+        removed["id"] = entry_id
+        return {"queue": []}
+
+    monkeypatch.setattr(manager_module.RunManager, "dequeue", fake_dequeue)
+    response = client.post("/api/queue/remove", json={"id": 7})
+
+    assert response.status_code == 200
+    assert removed["id"] == 7
+
+
+# -- run queue (manager behaviour) -----------------------------------------
+
+
+class _FakeResult:
+    def __init__(self, jobs):
+        self._jobs = jobs
+
+    def to_dict(self):
+        return {"ok": True, "summary": "", "jobs": self._jobs, "log_paths": []}
+
+
+class _FakeRunner:
+    """A runner that blocks in `run()` until released, so a test can control
+    exactly when one run ends and the next is promoted."""
+
+    def __init__(self, config, jobs, dry_run=False, on_event=None):
+        self.jobs = list(jobs)
+        self.dry_run = dry_run
+        self.job_states = [{"selector": job_selector(job)} for job in self.jobs]
+        self.elapsed_text = "0s"
+        self._gate = threading.Event()
+
+    def run(self):
+        self._gate.wait(5)
+        return _FakeResult(self.job_states)
+
+    def cancel(self):
+        self._gate.set()
+
+
+def _running_selector(manager):
+    jobs = manager.state["jobs"]
+    return jobs[0]["selector"] if jobs else None
+
+
+def _wait_until(predicate, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+@pytest.fixture
+def queue_manager(config_file, monkeypatch):
+    """A RunManager whose runs are fake and instantly controllable."""
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_file)
+    monkeypatch.setattr(manager_module, "SyncRunner", _FakeRunner)
+    manager = RunManager()
+    yield manager
+    # Release any run still blocked in its gate so the daemon thread can exit.
+    if manager._runner is not None:
+        manager._runner.cancel()
+
+
+def test_first_request_runs_and_the_rest_queue(queue_manager):
+    state = queue_manager.submit([{"selectors": ["robocopy:Docs"], "dry_run": False}])
+    assert state["running"] is True
+    assert state["queue"] == []
+    assert _running_selector(queue_manager) == "robocopy:Docs"
+
+    state = queue_manager.submit([{"selectors": ["rclone:NAS:Docs"], "dry_run": False}])
+    assert state["running"] is True
+    assert [entry["selectors"] for entry in state["queue"]] == [["rclone:NAS:Docs"]]
+
+
+def test_a_job_cannot_be_queued_twice_or_while_running(queue_manager):
+    queue_manager.submit([{"selectors": ["robocopy:Docs"]}])  # now running
+    queue_manager.submit([{"selectors": ["rclone:NAS:Docs"]}])  # queued
+
+    # The running job cannot also be queued behind itself.
+    state = queue_manager.submit([{"selectors": ["robocopy:Docs"]}])
+    assert len(state["queue"]) == 1
+
+    # Nor can an already-queued job be queued a second time.
+    state = queue_manager.submit([{"selectors": ["rclone:NAS:Docs"]}])
+    assert len(state["queue"]) == 1
+
+
+def test_finishing_a_run_promotes_the_next_queued_job(queue_manager):
+    queue_manager.submit([{"selectors": ["robocopy:Docs"]}])
+    queue_manager.submit([{"selectors": ["rclone:NAS:Docs"]}])
+
+    # End the first run; the queued job should start on its own.
+    queue_manager._runner.cancel()
+
+    assert _wait_until(lambda: not queue_manager.state["queue"])
+    assert _wait_until(lambda: queue_manager.state["running"])
+    assert _running_selector(queue_manager) == "rclone:NAS:Docs"
+
+
+def test_a_batch_starts_one_and_queues_the_rest_in_order(queue_manager):
+    state = queue_manager.submit(
+        [
+            {"selectors": ["robocopy:Docs"]},
+            {"selectors": ["rclone:NAS:Docs"]},
+            {"selectors": ["rclone:Local:Docs"]},
+        ]
+    )
+    assert _running_selector(queue_manager) == "robocopy:Docs"
+    assert [entry["selectors"] for entry in state["queue"]] == [
+        ["rclone:NAS:Docs"],
+        ["rclone:Local:Docs"],
+    ]
+
+
+def test_dequeue_removes_a_waiting_job(queue_manager):
+    queue_manager.submit([{"selectors": ["robocopy:Docs"]}])
+    state = queue_manager.submit([{"selectors": ["rclone:NAS:Docs"]}])
+    entry_id = state["queue"][0]["id"]
+
+    state = queue_manager.dequeue(entry_id)
+    assert state["queue"] == []
+
+
+def test_cancel_clears_the_queue(queue_manager):
+    queue_manager.submit([{"selectors": ["robocopy:Docs"]}])
+    queue_manager.submit([{"selectors": ["rclone:NAS:Docs"]}])
+
+    queue_manager.cancel()
+
+    assert queue_manager.state["queue"] == []
+    # The cancelled run ends and, with an empty queue, nothing is promoted.
+    assert _wait_until(lambda: not queue_manager.state["running"])
 
 
 def test_server_check_can_target_one_server(client, monkeypatch):

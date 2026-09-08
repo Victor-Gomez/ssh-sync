@@ -198,19 +198,40 @@ def create_app():
 
     @app.post("/api/run")
     def start_run(payload=Body(default=None)):
-        """Trigger a run over the given selectors (all enabled jobs if omitted)."""
+        """Run or queue jobs.
+
+        Each request runs when no other run is in progress and otherwise joins
+        the server-side queue, to start automatically as earlier runs finish.
+        The body is either a single request (`selectors`, `dry_run`) or a batch
+        of them (`items`), each of which becomes its own queued run.
+        """
         payload = payload or {}
-        selectors = payload.get("selectors") or None
+        raw_items = payload.get("items")
+        if raw_items is None:
+            raw_items = [payload]
+        items = [
+            {
+                "selectors": item.get("selectors") or None,
+                "dry_run": bool(item.get("dry_run", False)),
+            }
+            for item in raw_items
+        ]
         try:
-            return manager.start(selectors, dry_run=bool(payload.get("dry_run", False)))
+            return manager.submit(items)
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/queue/remove")
+    def remove_queued(payload=Body(...)):
+        """Drop one waiting run from the queue by its id."""
+        entry_id = (payload or {}).get("id")
+        if not isinstance(entry_id, int):
+            raise HTTPException(status_code=400, detail="A queue entry id is required.")
+        return manager.dequeue(entry_id)
 
     @app.post("/api/cancel")
     def cancel_run():
-        """Stop the active run."""
+        """Stop the active run and clear the queue."""
         try:
             return manager.cancel()
         except RuntimeError as exc:

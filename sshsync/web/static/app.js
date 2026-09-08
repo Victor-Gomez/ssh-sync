@@ -337,6 +337,7 @@ const state = {
   loaded: false,       // False until the config and its history have arrived.
   running: false,
   runElapsed: "",
+  queue: [],           // Jobs waiting their turn: {selector, label, dryRun}.
   device: storedDevice(),  // Device filter: "all", "local" or a server name.
   status: storedStatus(),  // Status filter: see STATUS_FILTERS below.
 };
@@ -777,11 +778,29 @@ function runAllTarget() {
   };
 }
 
+/** Concrete selectors run-all targets, with the offline shorthand expanded. */
+function runAllSelectors() {
+  return visibleJobs()
+    .filter((job) => job.enabled && !jobOffline(job))
+    .map((job) => job.selector);
+}
+
+/** Of those, the ones run-all could still add: not already running or queued. */
+function runAllQueueable() {
+  return runAllSelectors().filter(
+    (selector) => !isInActiveRun(selector) && queueIndexOf(selector) === -1,
+  );
+}
+
 function renderRunAllButton() {
   const button = $("#btn-run-all");
   const target = runAllTarget();
-  button.lastChild.textContent = target.text;
-  button.disabled = state.running || target.selectors?.length === 0;
+  // Run-all feeds every reachable job through the queue: the first starts now,
+  // the rest line up. Mid-run it just adds whatever isn't already lined up.
+  const pending = runAllQueueable().length;
+  button.lastChild.textContent =
+    state.running && pending ? `Queue all (${pending})` : target.text;
+  button.disabled = pending === 0;
 }
 
 /* -- job cards ---------------------------------------------------------- */
@@ -885,7 +904,10 @@ function renderJobs() {
 
   ordered.forEach((job) => {
     const live = liveStateFor(job);
-    const isRunning = live?.status === "RUNNING";
+    // "Active" means this job is the one the current run is on — RUNNING, or
+    // still PENDING while its server is being checked. Both read as busy so a
+    // reload lands on a card that shows the run in progress, not an idle one.
+    const isActive = isInActiveRun(job.selector);
     const offline = jobOffline(job);
 
     const card = document.createElement("div");
@@ -895,7 +917,7 @@ function renderJobs() {
       "transition-colors",
       // The border carries the job's state: amber mid-run or when the target
       // device is offline, red on failure.
-      isRunning
+      isActive
         ? "border-warn/50"
         : live?.status === "FAIL"
           ? "border-fail/45"
@@ -940,11 +962,22 @@ function renderJobs() {
       head.append(off);
     }
 
-    if (live && live.status !== "PENDING") {
+    if (live && (live.status !== "PENDING" || isActive)) {
+      // A pending-but-active job is starting up (checking its server), so it
+      // reads as "STARTING" in the same amber as a running one.
       const status = document.createElement("span");
-      status.className = `tag tag-${live.status.toLowerCase()}`;
-      status.textContent = live.status;
+      const pendingActive = live.status === "PENDING";
+      status.className = `tag tag-${pendingActive ? "running" : live.status.toLowerCase()}`;
+      status.textContent = pendingActive ? "STARTING" : live.status;
       head.append(status);
+    }
+
+    const queuePos = queueIndexOf(job.selector);
+    if (queuePos !== -1) {
+      const queued = document.createElement("span");
+      queued.className = "tag tag-queued";
+      queued.textContent = `Queued #${queuePos + 1}`;
+      head.append(queued);
     }
 
     const paths = document.createElement("dl");
@@ -970,25 +1003,33 @@ function renderJobs() {
     controls.className =
       "flex flex-col items-center justify-between gap-2.5";
 
+    const isQueued = queuePos !== -1;
     const run = document.createElement("button");
-    run.className = `icon-button icon-button-run${isRunning ? " is-running" : ""}`;
-    run.append(icon(isRunning ? "pause" : "play"));
-    if (isRunning) {
+    run.className = "icon-button icon-button-run"
+      + (isActive ? " is-running" : isQueued ? " is-queued" : "");
+    run.append(icon(isActive ? "pause" : "play"));
+    if (isActive) {
+      // The current job (running, or starting up) — the button stops the run.
       run.dataset.tip = "Stop this run";
       run.setAttribute("aria-label", `Stop ${job.name}`);
       run.addEventListener("click", cancelRun);
+    } else if (isQueued) {
+      // Already waiting its turn — the same button drops it from the queue.
+      run.dataset.tip = `Queued #${queuePos + 1} — click to remove`;
+      run.setAttribute("aria-label", `Remove ${job.name} from queue`);
+      run.addEventListener("click", () => dequeue(job.selector));
     } else {
-      // A job cannot run while its device is offline, and only one run happens
-      // at a time — so every other job's play button waits.
-      run.disabled = state.running || offline;
+      // Only one run happens at a time; if one is already going, the button
+      // queues this job to start automatically when the current run ends.
+      run.disabled = offline;
       run.dataset.tip = offline
         ? `${deviceOf(job)} is offline`
         : state.running
-          ? "Another run is in progress"
+          ? `Queue ${job.name}`
           : `Run ${job.name}`;
-      run.setAttribute("aria-label", `Run ${job.name}`);
+      run.setAttribute("aria-label", state.running ? `Queue ${job.name}` : `Run ${job.name}`);
       if (!offline) {
-        run.addEventListener("click", () => startRun([job.selector], job.name));
+        run.addEventListener("click", () => requestRun([job.selector], job.name));
       }
     }
 
@@ -1132,22 +1173,106 @@ function setRunOutcome(ok, summary) {
   indicator.dataset.tip = summary || "";
 }
 
-async function startRun(selectors, label) {
+/* -- run queue ----------------------------------------------------------
+ *
+ * Only one run happens at a time — two would race over the same destination
+ * trees — so pressing a job's play button while a run is on queues it instead.
+ * The queue lives on the server, which promotes the next job automatically as
+ * each run ends; every client mirrors it here from `state.queue`, kept fresh by
+ * the snapshot and `queue_updated` events. Because it is server-side, the queue
+ * survives a reload or a closed tab.
+ */
+
+/** Position of a job in the queue, or -1 if it is not waiting. */
+function queueIndexOf(selector) {
+  return state.queue.findIndex((entry) => entry.selectors.includes(selector));
+}
+
+/** The queue entry a job belongs to, or null. */
+function queueEntryFor(selector) {
+  return state.queue.find((entry) => entry.selectors.includes(selector)) || null;
+}
+
+/** Is this selector part of the run that is happening right now? */
+function isInActiveRun(selector) {
+  const live = state.live[selector];
+  return Boolean(live) && !TERMINAL_STATUSES.has(live.status);
+}
+
+/** Adopt the queue and running flag the server just reported. */
+function applyServerState(serverState) {
+  if (!serverState) return;
+  if (Array.isArray(serverState.queue)) state.queue = serverState.queue;
+  if (typeof serverState.running === "boolean") setRunning(serverState.running);
+  renderJobs();
+}
+
+/** Start a single job now, or queue it if a run is already in progress. */
+async function requestRun(selectors, label) {
+  const selector = selectors[0];
+  const dry = $("#dry-run").checked ? " (dry run)" : "";
   try {
-    setRunning(true);
-    renderJobs();
-    await api("/api/run", {
+    const serverState = await api("/api/run", {
       method: "POST",
-      body: JSON.stringify({
-        selectors: selectors?.length ? selectors : null,
-        dry_run: $("#dry-run").checked,
-      }),
+      body: JSON.stringify({ selectors, dry_run: $("#dry-run").checked }),
     });
-    const dry = $("#dry-run").checked ? " (dry run)" : "";
-    toast(`Started ${label}${dry}.`);
+    applyServerState(serverState);
+    if (queueIndexOf(selector) !== -1) {
+      toast(`Queued ${label} — starts when the current run ends.`);
+      pushFeed(`Queued ${label}${dry}.`, "info");
+    } else {
+      toast(`Started ${label}${dry}.`);
+    }
   } catch (error) {
-    setRunning(false);
-    renderJobs();
+    toast(`Could not start run: ${error.message}`, "error");
+    pushFeed(`Could not start run: ${error.message}`, "error");
+  }
+}
+
+/** Drop a queued job before it runs. */
+async function dequeue(selector) {
+  const entry = queueEntryFor(selector);
+  if (!entry) return;
+  try {
+    const serverState = await api("/api/queue/remove", {
+      method: "POST",
+      body: JSON.stringify({ id: entry.id }),
+    });
+    applyServerState(serverState);
+  } catch (error) {
+    toast(`Could not remove from queue: ${error.message}`, "error");
+  }
+}
+
+/** Queue every reachable job; the first starts now if nothing is running. */
+async function requestRunAll() {
+  const bySelector = new Map(state.jobs.map((job) => [job.selector, job]));
+  const dryRun = $("#dry-run").checked;
+  const pending = runAllQueueable();
+  if (!pending.length) {
+    toast("Every reachable job is already running or queued.", "error");
+    return;
+  }
+  const items = pending.map((selector) => ({ selectors: [selector], dry_run: dryRun }));
+  try {
+    const before = state.queue.length;
+    const running = state.running;
+    const serverState = await api("/api/run", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+    applyServerState(serverState);
+    const dry = dryRun ? " (dry run)" : "";
+    // If a run was already going, everything queued; otherwise the first started.
+    const added = state.queue.length - (running ? before : 0);
+    const startedOne = !running && state.running;
+    const parts = [];
+    if (startedOne) parts.push(`started ${bySelector.get(pending[0])?.name ?? pending[0]}`);
+    if (added > 0) parts.push(`queued ${added} job${added === 1 ? "" : "s"}`);
+    const summary = parts.length ? parts.join(", ") : "nothing to run";
+    toast(summary.charAt(0).toUpperCase() + summary.slice(1) + ".");
+    pushFeed(`Run all: ${summary}${dry}.`, "info");
+  } catch (error) {
     toast(`Could not start run: ${error.message}`, "error");
     pushFeed(`Could not start run: ${error.message}`, "error");
   }
@@ -1155,6 +1280,7 @@ async function startRun(selectors, label) {
 
 async function cancelRun() {
   try {
+    // The server stops the run and clears the queue; events refresh both.
     await api("/api/cancel", { method: "POST" });
     toast("Stopping run…");
     pushFeed("Cancellation requested.", "warning");
@@ -1163,10 +1289,7 @@ async function cancelRun() {
   }
 }
 
-$("#btn-run-all").addEventListener("click", () => {
-  const target = runAllTarget();
-  startRun(target.selectors, target.label);
-});
+$("#btn-run-all").addEventListener("click", requestRunAll);
 $("#btn-cancel").addEventListener("click", cancelRun);
 
 /* -- server checks ------------------------------------------------------ */
@@ -1266,12 +1389,18 @@ function applyEvent(event) {
   switch (event.type) {
     case "snapshot":
       replaceLiveJobs(event.state.jobs);
+      state.queue = event.state.queue || [];
       state.runElapsed = event.state.elapsed || "";
       setRunning(Boolean(event.state.running));
       if (event.state.result) {
         setRunOutcome(event.state.result.ok, event.state.result.summary);
       }
       renderProgress();
+      renderJobs();
+      break;
+
+    case "queue_updated":
+      state.queue = event.queue || [];
       renderJobs();
       break;
 
@@ -1307,6 +1436,7 @@ function applyEvent(event) {
       break;
 
     case "cancelled":
+      // The server clears the queue on cancel and sends queue_updated for it.
       pushFeed("Run cancelled.", "warning", event.at);
       break;
 

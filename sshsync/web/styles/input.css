@@ -173,6 +173,12 @@
            hover:text-warn hover:border-warn hover:bg-warn/20;
   }
 
+  /* A job waiting its turn: the same button drops it from the queue. */
+  .icon-button-run.is-queued {
+    @apply text-info border-info/55 bg-info/10
+           hover:text-info hover:border-info hover:bg-info/20;
+  }
+
   .input {
     @apply w-full rounded-md border border-edge bg-sunken px-2.5 py-2
            text-sm text-fg outline-none focus:border-brand;
@@ -252,6 +258,7 @@
   .tag-cancelled { @apply bg-fail/15 text-fail; }
   .tag-disabled  { @apply bg-dim/12 text-dim; }
   .tag-offline   { @apply bg-warn/15 text-warn; }
+  .tag-queued    { @apply bg-info/15 text-info; }
 
   /* Rounded pill: connection and run state. */
   .pill { @apply whitespace-nowrap rounded-full border border-transparent px-2.5 py-[3px] text-xs font-semibold; }
