@@ -191,6 +191,31 @@ choice is remembered per browser.
 > SSH key paths, and triggers local processes. It binds to `127.0.0.1` by
 > default. Only expose it further on a network you control.
 
+### System tray
+
+`SSH-Sync.bat` launches the same web server with no console window and drops a
+notification-area icon instead. It forwards any arguments through, so
+`--host`, `--port` and `--config` work as they do for `serve.py`:
+
+```bash
+SSH-Sync.bat                       # tray icon, UI on http://127.0.0.1:8420
+SSH-Sync.bat --port 9000 --config staging.json
+```
+
+Right-click the icon for its menu (left-click or double-click runs the default,
+**Open UI**):
+
+- **Open UI** — open the interface in the default browser.
+- **Copy URL** — copy the interface URL to the clipboard, to paste into any
+  other browser.
+- **Close** — stop the server and remove the icon. A run still in progress is
+  cancelled cleanly first — its rclone/robocopy backends are terminated and the
+  run is finalized — so nothing is left orphaned mid-copy. Closing a browser
+  tab, by contrast, leaves the server and any run untouched.
+
+Run `pythonw tray.py` directly for the same windowless launch, or `python
+tray.py` for one with a console for its logs.
+
 ## Development
 
 ```bash
