@@ -6,3 +6,7 @@ rich>=13.0
 # test client requires; older FastAPI releases fail against httpx 0.28+.
 fastapi>=0.111
 uvicorn[standard]>=0.27
+
+# Windowless system-tray launcher (tray.py / SSH-Sync.vbs).
+pystray>=0.19
+pillow>=10.0

@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "httpx>=0.26", "ruff>=0.3"]
+tray = ["pystray>=0.19", "pillow>=10.0"]
 
 [project.scripts]
 ssh-sync = "sshsync.cli:run"
