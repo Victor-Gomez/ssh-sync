@@ -4,8 +4,9 @@
 Runs the same uvicorn server as ``serve.py`` but with no console window.
 Instead it registers a taskbar (notification-area) icon with two actions:
 
-    * Open UI  - open the interface in the default browser
-    * Close    - stop the server and remove the icon
+    * Open UI   - open the interface in the default browser
+    * Copy URL  - copy the interface URL to the clipboard
+    * Close     - stop the server and remove the icon
 
 Run it directly for a normal (console) launch, or via ``pythonw.exe`` /
 ``SSH-Sync.vbs`` for a fully hidden one:
@@ -14,6 +15,7 @@ Run it directly for a normal (console) launch, or via ``pythonw.exe`` /
 """
 
 import os
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -30,6 +32,31 @@ if sys.stdout is None or sys.stderr is None:
 import uvicorn
 
 from serve import parse_args
+
+
+def _copy_to_clipboard(text):
+    """Put `text` on the Windows clipboard via the built-in clip.exe.
+
+    clip.exe stores stdin verbatim and the value survives this process, so the
+    copied URL stays available after the tray is closed. On any other platform
+    (or if clip is missing) this is a no-op rather than an error.
+    """
+    # Imported lazily: importing anything under `sshsync` pulls in
+    # `sshsync.paths`, which resolves the config path from the environment at
+    # import time. main() must set SSH_SYNC_CONFIG first, so keep sshsync out of
+    # this module's top-level imports.
+    from sshsync.commands import no_window_flags
+
+    try:
+        subprocess.run(
+            ["clip"],
+            input=text,
+            text=True,
+            check=True,
+            creationflags=no_window_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 try:
     import pystray
@@ -74,9 +101,17 @@ def main(argv=None):
 
     url = f"http://{args.host}:{args.port}"
 
+    # Build the app instance here (rather than passing uvicorn the factory
+    # string) so the tray holds a reference to its RunManager and can cancel an
+    # in-progress run before shutting down. Import is deferred until after the
+    # config-path environment is set above, since sshsync resolves it on import.
+    from sshsync.web.app import create_app
+
+    app = create_app()
+    manager = app.state.manager
+
     config = uvicorn.Config(
-        "sshsync.web.app:create_app",
-        factory=True,
+        app,
         host=args.host,
         port=args.port,
         log_level="warning",
@@ -91,7 +126,20 @@ def main(argv=None):
     def on_open(icon, item):
         webbrowser.open(url)
 
+    def on_copy_url(icon, item):
+        _copy_to_clipboard(url)
+
     def on_close(icon, item):
+        # Stop any active run cleanly before tearing the process down. cancel()
+        # terminates the backend subprocesses and lets the run thread mark jobs
+        # CANCELLED and finalize stats/logs; without this the daemon run thread
+        # would be killed mid-copy when the process exits, orphaning rclone.
+        try:
+            if manager.is_running:
+                manager.cancel()
+                manager.wait(timeout=30)
+        except Exception:
+            pass
         server.should_exit = True
         server_thread.join(timeout=10)
         icon.stop()
@@ -102,6 +150,7 @@ def main(argv=None):
         title=f"SSH-Sync ({url})",
         menu=pystray.Menu(
             pystray.MenuItem("Open UI", on_open, default=True),
+            pystray.MenuItem("Copy URL", on_copy_url),
             pystray.MenuItem("Close", on_close),
         ),
     )

@@ -298,6 +298,28 @@ def test_cancel_clears_the_queue(queue_manager):
     assert _wait_until(lambda: not queue_manager.state["running"])
 
 
+def test_wait_blocks_until_the_cancelled_run_finishes(queue_manager):
+    # Mirrors the tray's Close path: cancel the active run, then wait for its
+    # thread to finalize before the process would exit.
+    queue_manager.submit([{"selectors": ["robocopy:Docs"]}])
+    assert queue_manager.is_running
+
+    queue_manager.cancel()
+    queue_manager.wait(timeout=5)
+
+    # Once wait() returns the run thread has finished finalizing, so the run is
+    # no longer active and its thread is dead -- no need to poll for it.
+    assert queue_manager.is_running is False
+    assert queue_manager._thread is not None
+    assert not queue_manager._thread.is_alive()
+
+
+def test_wait_is_a_noop_when_idle(queue_manager):
+    # No run has ever started; wait() must return at once without erroring.
+    queue_manager.wait(timeout=1)
+    assert queue_manager.is_running is False
+
+
 def test_server_check_can_target_one_server(client, monkeypatch):
     probed = []
 

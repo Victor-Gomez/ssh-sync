@@ -263,6 +263,19 @@ class RunManager:
         if thread is not None:
             thread.start()
 
+    def wait(self, timeout=None):
+        """Block until the active run thread finishes; no-op when idle.
+
+        Used at shutdown so a cancelled run can terminate its subprocesses and
+        finalize (CANCELLED status, stats, logs) before the process exits.
+        Because `cancel()` also clears the queue, no new run is promoted while
+        waiting, so the thread this joins is the last one to run.
+        """
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+
     def cancel(self):
         """Stop the active run and clear the queue.
 
