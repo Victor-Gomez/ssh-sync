@@ -229,6 +229,10 @@ def test_temp_rclone_config_contains_the_server_details(tmp_path, monkeypatch):
     assert "type = sftp" in content
     assert "host = 192.168.1.10" in content
     assert "port = 2222" in content
+    # Remote hashing is disabled: the Windows OpenSSH (cmd.exe) targets cannot
+    # hash paths containing cmd metacharacters, which fails those files as
+    # "corrupted on transfer".
+    assert "disable_hashcheck = true" in content
 
 
 def test_temp_rclone_config_rejects_incomplete_servers():

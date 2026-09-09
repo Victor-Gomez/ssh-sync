@@ -14,6 +14,12 @@ from .paths import LOG_DIR
 # How much backend output to keep per job for the failure log.
 LOG_TAIL_LINES = 400
 
+# How many error lines to keep per job. Held separately from the tail because a
+# long run's per-second progress blocks would otherwise evict the few error
+# lines that actually explain the failure (e.g. which files could not be
+# deleted) before the log is written.
+LOG_ERROR_LINES = 200
+
 LOG_NAME_PREFIX = "sync-"
 LOG_NAME_SUFFIX = ".log"
 
@@ -69,12 +75,17 @@ def available_log_dates():
     return sorted((date for date in dates if _DATE_PATTERN.match(date)), reverse=True)
 
 
-def write_failure_log(job_name, server, command, exit_code, stats, tail_lines):
-    """Append a failed job's command and output tail to today's log.
+def write_failure_log(
+    job_name, server, command, exit_code, stats, tail_lines, error_lines=None
+):
+    """Append a failed job's command, error lines and output tail to today's log.
 
-    Returns the log path, or None if it could not be written -- logging must
-    never take down a sync run.
+    `error_lines` are the backend's error lines, kept apart from `tail_lines` so
+    they survive a long run's progress spam; they are written first because they
+    are what a reader needs. Returns the log path, or None if it could not be
+    written -- logging must never take down a sync run.
     """
+    error_lines = error_lines or []
     try:
         with _WRITE_LOCK:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -90,6 +101,10 @@ def write_failure_log(job_name, server, command, exit_code, stats, tail_lines):
                     f"errors={stats.get('error_count', 0)} "
                     f"last_error={stats.get('last_error', '')!r}\n"
                 )
+                if error_lines:
+                    handle.write(f"--- {len(error_lines)} error line(s) ---\n")
+                    for line in error_lines:
+                        handle.write(line + "\n")
                 handle.write(f"--- last {len(tail_lines)} output lines ---\n")
                 for line in tail_lines:
                     handle.write(line + "\n")

@@ -9,6 +9,7 @@ import pytest
 from sshsync.executor import (
     RcloneParser,
     RobocopyParser,
+    _is_error_line,
     new_stats,
     parse_robocopy_size,
     parse_size,
@@ -151,3 +152,32 @@ def test_robocopy_synthesizes_an_error_when_none_was_printed():
 def test_checks_done_never_exceeds_total():
     stats = feed_all(RobocopyParser(), "   Files :  10  8  8  0  0  0")
     assert stats["checks_done"] == 10
+
+
+# -- error line detection --------------------------------------------------
+
+
+def test_rclone_error_line_is_detected():
+    line = (
+        "2026/09/03 13:28:18 ERROR : photo.jpg: Couldn't delete: "
+        "remove /D:/Fotos/zTools/photo.jpg: permission denied"
+    )
+    assert _is_error_line(line, "rclone")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Transferred:   	    2.071 GiB / 2.071 GiB, 100%",
+        "2026/09/03 13:28:18 NOTICE: some notice",
+        # The word "error" in a path must not be mistaken for an error tag.
+        "2026/09/03 13:28:18 INFO  : error-report.txt: Copied (new)",
+    ],
+)
+def test_rclone_non_error_lines_are_ignored(line):
+    assert not _is_error_line(line, "rclone")
+
+
+def test_robocopy_error_line_is_detected():
+    assert _is_error_line("2026/09/03 ERROR 32 (0x00000020) Copying File", "robocopy")
+    assert not _is_error_line("   Files :  10  8  8  0  0  0", "robocopy")

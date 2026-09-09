@@ -45,7 +45,12 @@ def stubs(monkeypatch):
     calls = {"commands": [], "stats": [], "exit_codes": {}}
 
     def fake_stream(
-        command, on_update=None, parser_mode="rclone", on_process=None, line_buffer=None
+        command,
+        on_update=None,
+        parser_mode="rclone",
+        on_process=None,
+        line_buffer=None,
+        error_buffer=None,
     ):
         name = command[-1]
         calls["commands"].append(name)
@@ -240,7 +245,12 @@ def test_cancelling_mid_run_marks_the_job_cancelled(stubs, monkeypatch):
     holder = {}
 
     def cancelling_stream(
-        command, on_update=None, parser_mode="rclone", on_process=None, line_buffer=None
+        command,
+        on_update=None,
+        parser_mode="rclone",
+        on_process=None,
+        line_buffer=None,
+        error_buffer=None,
     ):
         holder["runner"].cancel()
         return 0, new_stats()

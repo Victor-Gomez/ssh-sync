@@ -294,6 +294,15 @@ def create_temp_rclone_config(server):
             f"key_file = {key_file}",
             f"port = {port}",
             "set_modtime = true",
+            # These servers run Windows OpenSSH, whose default shell is cmd.exe.
+            # To verify a transfer rclone hashes the file on the remote by running
+            # a shell command, but it refuses to pass a path containing cmd
+            # metacharacters such as "!" ("path is not valid in shell type cmd").
+            # The dst hash then comes back empty, mismatches the source, and every
+            # such file fails as "corrupted on transfer" despite uploading fine.
+            # cmd has no md5sum/sha1sum anyway, so disable remote hashing and let
+            # rclone compare on size + modtime instead.
+            "disable_hashcheck = true",
             "",
         ]
     )

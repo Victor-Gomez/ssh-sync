@@ -193,8 +193,25 @@ class RobocopyParser:
 PARSERS = {"rclone": RcloneParser, "robocopy": RobocopyParser}
 
 
+def _is_error_line(line, parser_mode):
+    """Report whether an output line carries a backend error worth keeping.
+
+    rclone tags errors as ` ERROR : `; robocopy prints an all-caps `ERROR`
+    followed by the failing path. Both are rare next to the per-second progress
+    spam, so they are what a failure log actually needs.
+    """
+    if parser_mode == "robocopy":
+        return "ERROR" in line.upper()
+    return " ERROR : " in line
+
+
 def stream_command(
-    command, on_update=None, parser_mode="rclone", on_process=None, line_buffer=None
+    command,
+    on_update=None,
+    parser_mode="rclone",
+    on_process=None,
+    line_buffer=None,
+    error_buffer=None,
 ):
     """Run a backend command, parsing its output into stats as it streams.
 
@@ -207,6 +224,10 @@ def stream_command(
         line_buffer: Optional deque receiving every output line. Give it a
             maxlen so failures can be logged with context without holding the
             whole transcript in memory.
+        error_buffer: Optional deque receiving only the error lines. Kept apart
+            from `line_buffer` because a long run's per-second stats otherwise
+            push the handful of error lines -- the ones that explain the
+            failure -- out of the tail before it is logged.
 
     Returns:
         Tuple of `(exit_code, stats)`.
@@ -238,6 +259,8 @@ def stream_command(
             line = raw_line.rstrip("\r\n")
             if line_buffer is not None:
                 line_buffer.append(line)
+            if error_buffer is not None and _is_error_line(line, parser_mode):
+                error_buffer.append(line)
 
             stats["elapsed"] = format_elapsed(time.monotonic() - started_at)
             parser.feed(stats, line)

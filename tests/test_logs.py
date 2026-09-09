@@ -69,3 +69,21 @@ def test_written_failures_land_on_a_listed_date(isolated_log_dir):
 
     assert path is not None
     assert path.name[len("sync-") : -len(".log")] in available_log_dates()
+
+
+def test_failure_log_records_error_lines_ahead_of_the_tail(isolated_log_dir):
+    path = write_failure_log(
+        job_name="Fotos_zTools",
+        server="Server",
+        command=["rclone", "sync"],
+        exit_code=1,
+        stats={"error_count": 8, "last_error": "failed to delete 8 files"},
+        tail_lines=["Transferred: 2 GiB / 2 GiB, 100%"],
+        error_lines=["ERROR : photo.jpg: Couldn't delete: permission denied"],
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert "1 error line(s)" in content
+    assert "Couldn't delete: permission denied" in content
+    # The error section must come before the progress tail.
+    assert content.index("Couldn't delete") < content.index("Transferred:")

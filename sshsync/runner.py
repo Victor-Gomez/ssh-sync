@@ -21,7 +21,7 @@ from .commands import (
 )
 from .config import job_selector
 from .executor import new_stats, stream_command
-from .logs import LOG_TAIL_LINES, write_failure_log
+from .logs import LOG_ERROR_LINES, LOG_TAIL_LINES, write_failure_log
 from .planner import build_job_dependencies, build_job_lanes, required_rclone_servers
 from .stats import append_job_stats
 from .utils import (
@@ -519,12 +519,14 @@ class SyncRunner:
             self._emit_job(index)
 
         tail_lines = deque(maxlen=LOG_TAIL_LINES)
+        error_lines = deque(maxlen=LOG_ERROR_LINES)
         exit_code, stats = stream_command(
             command,
             on_update=on_update,
             parser_mode=parser_mode,
             on_process=self._track_process,
             line_buffer=tail_lines,
+            error_buffer=error_lines,
         )
         state["stats"] = stats
 
@@ -542,6 +544,7 @@ class SyncRunner:
                 exit_code,
                 stats,
                 list(tail_lines),
+                list(error_lines),
             )
             with self._failures_lock:
                 self._failures.append((job_name, exit_code))
